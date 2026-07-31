@@ -217,14 +217,27 @@
       .replace(/"/g, '&quot;');
   }
 
-  function renderPersonInfo(item) {
-    const outVerb = item.isStarred ? '使用' : '借出中';
-    const inVerb = item.isStarred ? '補充' : '已歸還';
-    if (!item.borrower && !item.returner) return '<span class="borrow-info">—</span>';
-    const parts = [];
-    if (item.borrower) parts.push(`${outVerb}：${escapeHtml(item.borrower)}`);
-    if (item.returner) parts.push(`${inVerb}：${escapeHtml(item.returner)}`);
-    return `<span class="borrow-info">${parts.join(' ／ ')}</span>`;
+  function renderPersonInfo(test, item) {
+    if (item.isStarred) {
+      if (!item.borrower && !item.returner) return '<span class="borrow-info">—</span>';
+      const parts = [];
+      if (item.borrower) parts.push(`使用：${escapeHtml(item.borrower)}`);
+      if (item.returner) parts.push(`補充：${escapeHtml(item.returner)}`);
+      return `<span class="borrow-info">${parts.join(' ／ ')}</span>`;
+    }
+
+    // 借還品可能同時有多筆未歸還的借出（例如先借1件、又借2件、都還沒還），
+    // 用 FIFO 未歸還清單列出所有目前借出中的人，而不是只顯示最後一次借的人。
+    const outstanding = getOutstandingLoans(test.id, test.group, item.code, item);
+    if (outstanding.length > 0) {
+      const names = outstanding.map((l) => {
+        const qtyLabel = l.remaining === null ? '' : `(${l.remaining})`;
+        return escapeHtml(l.borrower || '未指定') + qtyLabel;
+      });
+      return `<span class="borrow-info">借出中：${names.join('、')}</span>`;
+    }
+    if (item.returner) return `<span class="borrow-info">已歸還：${escapeHtml(item.returner)}</span>`;
+    return '<span class="borrow-info">—</span>';
   }
 
   function renderGroupTags() {
@@ -303,7 +316,7 @@
           const status = itemStatus(item);
           const stockDisplay = item.currentStock === null ? '—' : item.currentStock;
 
-          const borrowInfo = renderPersonInfo(item);
+          const borrowInfo = renderPersonInfo(test, item);
 
           const codeDisplay = escapeHtml(item.code.replace('*', ''));
           const star = item.isStarred ? '<span class="star-mark" title="消耗品：借用數量需累計加總，請見清冊備註">*</span>' : '';
