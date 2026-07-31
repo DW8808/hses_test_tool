@@ -13,6 +13,8 @@
   const RELOAD_STATE_KEY = 'schoolTestTool.reloadState.v1';
   const CUSTOM_KEY = 'schoolTestTool.customTests.v1';
   const ADMIN_MODE_KEY = 'schoolTestTool.adminMode.v1';
+  const ADMIN_PIN_KEY = 'schoolTestTool.adminPin.v1';
+  const DELETED_ITEMS_KEY = 'schoolTestTool.deletedItems.v1';
   const LOW_STOCK_DEFAULT = 5;
 
   /** @type {{generatedAt:string, sourceFile:string, borrowers:string[], tests:Array}} */
@@ -26,12 +28,20 @@
   // 對到既有測驗就把 items 併進去，對不到就整筆推一個新測驗進去。
   let customTests = {};
 
+  // 本機模式：管理員刪除掉、或編輯搬走的「原始清冊」品項，用 keyFor(testId,group,code) 記下來，
+  // 合併資料時要濾掉，因為 window.TEST_TOOL_DATA 本身是唯讀的、不能真的從裡面刪除。
+  let deletedItemKeys = new Set();
+
   // 雲端模式：伺服器回傳的歷史紀錄： { "測驗id::項目code": [ {action, qty, person, at}, ... ] }
   let historyMap = {};
 
   // 是否顯示管理員專用功能（連線設定、新增測驗/項目、調整庫存、編輯異動紀錄）。
-  // 用 ?admin=1 開過一次後會記在這台裝置的 localStorage 裡，避免每次整頁重新整理就消失。
+  // 要輸入管理員密碼驗證通過才會是 true，通過後記在這台裝置的 localStorage 裡，
+  // 避免每次整頁重新整理（管理員操作送出後都會整頁重整）就要重新輸入一次。
   let isAdminMode = false;
+
+  // 網址帶 ?admin=1 只是「這次載入要跳出管理員密碼輸入視窗」的訊號，不代表已經通過驗證。
+  let pendingAdminPinRequest = false;
 
   // Google Apps Script 網址固定寫在 config.js 裡（見該檔案），不透過網址參數傳遞。
   const GAS_URL = (window.GAS_CONFIG && window.GAS_CONFIG.url) || '';
@@ -56,6 +66,10 @@
   let editingHistoryAt = null;
   let confirmingDeleteAt = null;
 
+  // 管理員：「新增測驗/項目」Modal 目前是不是在編輯既有項目（而不是新增）。
+  // null = 新增模式；{ testId, group, code } = 正在編輯這個項目。
+  let editingItemRef = null;
+
   function isServerMode() {
     return !!(connection && connection.url && connection.pin);
   }
@@ -67,20 +81,21 @@
   }
 
   // ---------- 雲端連線設定持久化 ----------
-  // 網址只用來開關「⚙️ 連線設定」按鈕：加 ?admin=1 才會顯示，避免老師不小心誤按到取消連線。
+  // 網址只用來開關管理員相關功能：加 ?admin=1 才會跳出管理員密碼輸入視窗，避免老師不小心誤按到。
   // Apps Script 網址固定在 config.js，不會出現在任何連結裡。
   //
-  // 一旦用 ?admin=1 打開過，就把這台裝置標記成管理員（存 localStorage），之後不用每次都帶參數；
+  // 密碼驗證通過後才把這台裝置標記成管理員（存 localStorage），之後不用每次都重新輸入；
   // 這一步是必要的：管理員操作（新增測驗/調整庫存/編輯紀錄）送出後都會整頁重新整理，
   // 如果只看網址參數，第一次載入時 history.replaceState 就會把 ?admin=1 從網址列拿掉，
-  // 導致下一次重整（也就是每次操作完）管理員身分就消失了。
+  // 導致下一次重整（也就是每次操作完）就要重新輸入一次密碼。
   function applyAdminFlagFromUrl() {
     const params = new URLSearchParams(window.location.search);
     if (params.get('admin') === '1') {
-      localStorage.setItem(ADMIN_MODE_KEY, '1');
+      pendingAdminPinRequest = true;
     } else if (params.get('admin') === '0') {
       // 退出管理員模式用：這台裝置如果不小心點到 ?admin=1 的連結，用 ?admin=0 開一次就能取消標記。
       localStorage.removeItem(ADMIN_MODE_KEY);
+      localStorage.removeItem(ADMIN_PIN_KEY);
     }
     isAdminMode = localStorage.getItem(ADMIN_MODE_KEY) === '1';
     if (params.toString()) {
@@ -88,6 +103,10 @@
       url.search = '';
       window.history.replaceState({}, '', url.toString());
     }
+  }
+
+  function getAdminPin() {
+    return localStorage.getItem(ADMIN_PIN_KEY) || '';
   }
 
   function loadConnection() {
@@ -148,6 +167,27 @@
     }
     // 跟雲端模式的 doGet() 一樣依編號、分頁排序，避免新增的測驗永遠被塞在清單最後面。
     baseData.tests.sort((a, b) => a.id - b.id || String(a.group).localeCompare(String(b.group)));
+  }
+
+  // ---------- 本機模式：管理員刪除／編輯搬移掉的原始清冊品項 ----------
+  function loadDeletedItems() {
+    try {
+      const raw = localStorage.getItem(DELETED_ITEMS_KEY);
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  function saveDeletedItems() {
+    localStorage.setItem(DELETED_ITEMS_KEY, JSON.stringify(Array.from(deletedItemKeys)));
+  }
+
+  function applyDeletedItems() {
+    if (deletedItemKeys.size === 0) return;
+    for (const test of baseData.tests) {
+      test.items = test.items.filter((it) => !deletedItemKeys.has(keyFor(test.id, test.group, it.code)));
+    }
   }
 
   // 來源清冊裡編號 18/19/20 因為在兩個分頁（11-20、21-30）重複出現，
@@ -224,7 +264,9 @@
       });
       adjustments = loadAdjustments();
       customTests = loadCustomTests();
+      deletedItemKeys = loadDeletedItems();
       applyCustomTests();
+      applyDeletedItems();
     }
     renderBorrowerList();
     render();
@@ -588,6 +630,78 @@
     saveAdjustments();
   }
 
+  // 本機模式：把一個項目（連同它的借還異動紀錄）從舊位置搬到新位置。測驗編號/分頁/代碼只要有任何一項
+  // 不同，key 就不一樣；「編輯測驗名稱/編號/分頁」跟「編輯項目代碼/消耗品」底層都是靠這個函式做搬移，
+  // 不直接改 window.TEST_TOOL_DATA 裡的原始物件（那份要維持唯讀），一律透過 customTests 覆蓋、
+  // deletedItemKeys 標記原始清冊裡的舊位置已經搬走。呼叫完要記得自己存檔（saveAdjustments 等）。
+  function moveItemLocal(oldTestId, oldGroup, oldCode, newTestId, newGroup, newTestName, newItem) {
+    const oldTestKey = oldTestId + '::' + oldGroup;
+    const newTestKey = newTestId + '::' + newGroup;
+    const oldAdjKey = keyFor(oldTestId, oldGroup, oldCode);
+    const newAdjKey = keyFor(newTestId, newGroup, newItem.code);
+
+    if (oldAdjKey !== newAdjKey && adjustments[oldAdjKey]) {
+      adjustments[newAdjKey] = adjustments[oldAdjKey];
+      delete adjustments[oldAdjKey];
+    }
+
+    // 同一個測驗底下可能同時混著「原始清冊項目」跟「之前已經搬進 customTests 的項目」，
+    // 不能只看 customTests[oldTestKey] 存不存在，要實際找這個代碼是不是真的在裡面，
+    // 不然原始清冊項目會被誤判成「已經在 customTests 裡」，變成沒被標記刪除、留在舊位置。
+    const oldCustomIdx = customTests[oldTestKey] ? customTests[oldTestKey].items.findIndex((it) => it.code === oldCode) : -1;
+    if (oldCustomIdx !== -1) {
+      customTests[oldTestKey].items.splice(oldCustomIdx, 1);
+      if (customTests[oldTestKey].items.length === 0) delete customTests[oldTestKey];
+    } else {
+      deletedItemKeys.add(keyFor(oldTestId, oldGroup, oldCode));
+    }
+
+    if (!customTests[newTestKey]) customTests[newTestKey] = { id: newTestId, group: newGroup, name: newTestName, items: [] };
+    customTests[newTestKey].name = newTestName;
+    customTests[newTestKey].items.push(newItem);
+  }
+
+  // 編輯測驗資訊（編號/分頁/名稱）：這三個欄位在資料裡是每個項目都重複存一份，所以要把這個測驗
+  // 底下「所有」項目一起搬到新位置，不能只搬正在編輯的那一個，不然其他項目會變成孤兒/屬於舊測驗。
+  function editTestLocal(oldTestId, oldGroup, newTestId, newGroup, newTestName) {
+    const test = baseData.tests.find((t) => t.id === oldTestId && t.group === oldGroup);
+    if (!test) return;
+    for (const item of test.items.slice()) {
+      moveItemLocal(oldTestId, oldGroup, item.code, newTestId, newGroup, newTestName, item);
+    }
+    saveAdjustments();
+    saveCustomTests();
+    saveDeletedItems();
+  }
+
+  // 編輯單一項目的代碼／是否為消耗品，測驗本身的編號/分頁/名稱不變。
+  function editItemLocal(testId, group, oldCode, newCode, newIsStarred) {
+    const test = baseData.tests.find((t) => t.id === testId && t.group === group);
+    if (!test) return;
+    const item = test.items.find((it) => it.code === oldCode);
+    if (!item) return;
+    const updatedItem = Object.assign({}, item, { code: newCode, isStarred: newIsStarred });
+    moveItemLocal(testId, group, oldCode, testId, group, test.name, updatedItem);
+    saveAdjustments();
+    saveCustomTests();
+    saveDeletedItems();
+  }
+
+  function deleteItemLocal(testId, group, code) {
+    const testKey = testId + '::' + group;
+    if (customTests[testKey]) {
+      const idx = customTests[testKey].items.findIndex((it) => it.code === code);
+      if (idx !== -1) customTests[testKey].items.splice(idx, 1);
+      if (customTests[testKey].items.length === 0) delete customTests[testKey];
+      saveCustomTests();
+    } else {
+      deletedItemKeys.add(keyFor(testId, group, code));
+      saveDeletedItems();
+    }
+    delete adjustments[keyFor(testId, group, code)];
+    saveAdjustments();
+  }
+
   // 借還品專用：把「借出/歸還」事件依時間序配對成一筆筆借出批次（FIFO）。
   // 例：先借1件、再借2件 => 兩筆未歸還批次；之後一次歸還3件 => 依序沖銷，兩筆都標記為已歸還。
   // 歸還時優先沖銷「同一位借用者」自己名下尚未歸還的批次（同樣依借出時間 FIFO）；
@@ -807,6 +921,9 @@
     activeAction = quickAction === 'return' ? 'return' : 'borrow';
 
     document.getElementById('segAdjustBtn').classList.toggle('hidden', !isAdminMode);
+    document.getElementById('editItemBtn').classList.toggle('hidden', !isAdminMode);
+    document.getElementById('deleteItemBtn').classList.toggle('hidden', !isAdminMode);
+    document.getElementById('deleteItemConfirm').classList.add('hidden');
 
     document.getElementById('modalTitle').textContent = found.test.name;
     document.getElementById('modalSubtitle').textContent = code.replace('*', '');
@@ -824,6 +941,7 @@
 
   function closeModal() {
     document.getElementById('modalOverlay').classList.add('hidden');
+    document.getElementById('deleteItemConfirm').classList.add('hidden');
     activeItemRef = null;
     editingHistoryAt = null;
     confirmingDeleteAt = null;
@@ -850,7 +968,7 @@
 
     if (isServerMode()) {
       try {
-        const result = await apiPost({ testId, group, code, action: 'adjust', newStock, person });
+        const result = await apiPost({ testId, group, code, action: 'adjust', newStock, person, adminPin: getAdminPin() });
         if (!result.ok) {
           showToast(result.error || '調整失敗');
           submitBtn.disabled = false;
@@ -1002,7 +1120,7 @@
 
     if (isServerMode()) {
       try {
-        const result = await apiPost({ testId, group, code, action: 'editHistory', at, newAction, newQty, newPerson });
+        const result = await apiPost({ testId, group, code, action: 'editHistory', at, newAction, newQty, newPerson, adminPin: getAdminPin() });
         if (!result.ok) {
           showToast(result.error || '更新失敗');
           return;
@@ -1027,7 +1145,7 @@
 
     if (isServerMode()) {
       try {
-        const result = await apiPost({ testId, group, code, action: 'editHistory', at, delete: true });
+        const result = await apiPost({ testId, group, code, action: 'editHistory', at, delete: true, adminPin: getAdminPin() });
         if (!result.ok) {
           showToast(result.error || '刪除失敗');
           return;
@@ -1307,6 +1425,8 @@
         saveAdjustments();
         customTests = {}; // 舊清冊裡管理員新增的測驗／項目編號可能對不上新清冊，一併歸零
         saveCustomTests();
+        deletedItemKeys = new Set();
+        saveDeletedItems();
         renderBorrowerList();
         render();
         showToast(`匯入成功，共 ${parsed.tests.length} 項測驗`);
@@ -1362,7 +1482,13 @@
   }
 
   function openAddItemModal() {
+    editingItemRef = null;
     renderAddGroupOptions();
+    document.getElementById('addItemModalTitle').textContent = '➕ 新增測驗/項目';
+    document.getElementById('addItemModalSubtitle').textContent =
+      '測驗編號＋分頁如果對到已經存在的測驗，會把這個項目加進該測驗底下；對不到的話會建立一筆全新的測驗。';
+    document.getElementById('addItemSubmit').textContent = '確認新增';
+    document.getElementById('addItemStockField').classList.remove('hidden');
     document.getElementById('addTestId').value = '';
     document.getElementById('addTestName').value = '';
     document.getElementById('addTestName').readOnly = false;
@@ -1375,8 +1501,45 @@
     document.getElementById('addItemModalOverlay').classList.remove('hidden');
   }
 
+  // 管理員：從借還 Modal 點「編輯項目」，用同一個 Modal 表單改成編輯模式，預先帶入目前的值。
+  // 庫存不在這裡改（已經有專門的「調整庫存」，會留異動紀錄），所以隱藏庫存欄位。
+  function openEditItemModal(testId, group, code) {
+    const found = findTestAndItem(testId, group, code);
+    if (!found) return;
+    editingItemRef = { testId, group, code };
+    renderAddGroupOptions();
+
+    document.getElementById('addItemModalTitle').textContent = '✏️ 編輯測驗/項目';
+    document.getElementById('addItemModalSubtitle').textContent =
+      '修改測驗編號/分頁/名稱，這個測驗底下所有項目都會一起搬過去，請小心使用。';
+    document.getElementById('addItemSubmit').textContent = '儲存修改';
+    document.getElementById('addItemStockField').classList.add('hidden');
+
+    document.getElementById('addTestId').value = testId;
+    const groupSelect = document.getElementById('addGroupSelect');
+    const otherInput = document.getElementById('addGroupOther');
+    const knownGroups = Array.from(groupSelect.options).map((o) => o.value);
+    if (knownGroups.includes(group)) {
+      groupSelect.value = group;
+      otherInput.style.display = 'none';
+      otherInput.value = '';
+    } else {
+      groupSelect.value = GROUP_OTHER_OPTION;
+      otherInput.style.display = 'block';
+      otherInput.value = group;
+    }
+    document.getElementById('addTestName').value = found.test.name;
+    document.getElementById('addTestName').readOnly = true;
+    addTestNameAutoFilled = true;
+    document.getElementById('addItemCode').value = code.replace('*', '');
+    document.getElementById('addItemStarred').checked = found.item.isStarred;
+
+    document.getElementById('addItemModalOverlay').classList.remove('hidden');
+  }
+
   function closeAddItemModal() {
     document.getElementById('addItemModalOverlay').classList.add('hidden');
+    editingItemRef = null;
   }
 
   async function submitAddItem() {
@@ -1385,7 +1548,6 @@
     const group = getAddGroupValue();
     const codeRaw = document.getElementById('addItemCode').value.trim();
     const isStarred = document.getElementById('addItemStarred').checked;
-    const stockRaw = document.getElementById('addItemStock').value.trim();
 
     if (!testIdRaw || !Number.isInteger(testId) || testId <= 0) {
       showToast('請輸入正確的測驗編號（正整數）');
@@ -1399,11 +1561,6 @@
       showToast('請輸入項目代碼');
       return;
     }
-    const currentStock = stockRaw === '' ? null : Number(stockRaw);
-    if (stockRaw !== '' && (Number.isNaN(currentStock) || currentStock < 0)) {
-      showToast('庫存數量格式錯誤');
-      return;
-    }
 
     const existingTest = baseData.tests.find((t) => t.id === testId && t.group === group);
     const testName = existingTest ? existingTest.name : document.getElementById('addTestName').value.trim();
@@ -1413,6 +1570,18 @@
     }
 
     const code = isStarred ? (codeRaw.endsWith('*') ? codeRaw : codeRaw + '*') : codeRaw.replace(/\*+$/, '');
+
+    if (editingItemRef) {
+      await submitEditItem(testId, group, testName, code, isStarred);
+      return;
+    }
+
+    const stockRaw = document.getElementById('addItemStock').value.trim();
+    const currentStock = stockRaw === '' ? null : Number(stockRaw);
+    if (stockRaw !== '' && (Number.isNaN(currentStock) || currentStock < 0)) {
+      showToast('庫存數量格式錯誤');
+      return;
+    }
     if (existingTest && existingTest.items.some((it) => it.code === code)) {
       showToast('這個測驗底下已經有相同的項目代碼了');
       return;
@@ -1423,7 +1592,7 @@
 
     if (isServerMode()) {
       try {
-        const result = await apiPost({ action: 'addItem', testId, group, testName, code, isStarred, currentStock });
+        const result = await apiPost({ action: 'addItem', testId, group, testName, code, isStarred, currentStock, adminPin: getAdminPin() });
         if (!result.ok) {
           showToast(result.error || '新增失敗');
           submitBtn.disabled = false;
@@ -1456,6 +1625,108 @@
 
     showToast('已新增');
     closeAddItemModal();
+    reloadPageAfterSubmit();
+  }
+
+  // 管理員：儲存「編輯測驗/項目」的修改。newTestId/newGroup/newTestName 如果跟原本不同，
+  // 這個測驗底下所有項目都會一起搬到新位置（見 editTestLocal/moveItemLocal 的說明）。
+  async function submitEditItem(newTestId, newGroup, newTestName, newCode, newIsStarred) {
+    const { testId: oldTestId, group: oldGroup, code: oldCode } = editingItemRef;
+
+    const targetTest = baseData.tests.find((t) => t.id === newTestId && t.group === newGroup);
+    const isSameSpot = newTestId === oldTestId && newGroup === oldGroup;
+    if (targetTest) {
+      const collide = targetTest.items.some((it) => it.code === newCode && !(isSameSpot && it.code === oldCode));
+      if (collide) {
+        showToast('這個測驗底下已經有相同的項目代碼了');
+        return;
+      }
+    }
+
+    const submitBtn = document.getElementById('addItemSubmit');
+    submitBtn.disabled = true;
+
+    if (isServerMode()) {
+      try {
+        const result = await apiPost({
+          action: 'editItem',
+          testId: oldTestId,
+          group: oldGroup,
+          code: oldCode,
+          newTestId,
+          newGroup,
+          newTestName,
+          newCode,
+          newIsStarred,
+          adminPin: getAdminPin(),
+        });
+        if (!result.ok) {
+          showToast(result.error || '更新失敗');
+          submitBtn.disabled = false;
+          return;
+        }
+        showToast('已更新');
+        closeAddItemModal();
+        closeModal();
+        reloadPageAfterSubmit();
+      } catch (err) {
+        showToast('連線失敗，請確認網路連線');
+        submitBtn.disabled = false;
+      }
+      return;
+    }
+
+    // ---------- 本機模式 ----------
+    const oldTest = baseData.tests.find((t) => t.id === oldTestId && t.group === oldGroup);
+    const identityChanged = !isSameSpot || (oldTest && oldTest.name !== newTestName);
+
+    if (identityChanged && oldTest) {
+      for (const sibling of oldTest.items.slice()) {
+        if (sibling.code === oldCode) continue; // 正在編輯的這個項目下面連新代碼/消耗品一起處理
+        moveItemLocal(oldTestId, oldGroup, sibling.code, newTestId, newGroup, newTestName, sibling);
+      }
+    }
+    const found = findTestAndItem(oldTestId, oldGroup, oldCode);
+    const baseItem = found
+      ? found.item
+      : { code: oldCode, isStarred: false, currentStock: null, borrower: '', returner: '', returnPurchaseQty: 0, borrowConsumeQty: 0 };
+    const updatedItem = Object.assign({}, baseItem, { code: newCode, isStarred: newIsStarred });
+    moveItemLocal(oldTestId, oldGroup, oldCode, newTestId, newGroup, newTestName, updatedItem);
+
+    saveAdjustments();
+    saveCustomTests();
+    saveDeletedItems();
+
+    showToast('已更新');
+    closeAddItemModal();
+    closeModal();
+    reloadPageAfterSubmit();
+  }
+
+  // 管理員：刪除目前 Modal 裡這個項目。
+  async function submitDeleteItem() {
+    if (!activeItemRef) return;
+    const { testId, group, code } = activeItemRef;
+
+    if (isServerMode()) {
+      try {
+        const result = await apiPost({ testId, group, code, action: 'deleteItem', adminPin: getAdminPin() });
+        if (!result.ok) {
+          showToast(result.error || '刪除失敗');
+          return;
+        }
+        showToast('已刪除項目');
+        closeModal();
+        reloadPageAfterSubmit();
+      } catch (err) {
+        showToast('連線失敗，請確認網路連線');
+      }
+      return;
+    }
+
+    deleteItemLocal(testId, group, code);
+    showToast('已刪除項目');
+    closeModal();
     reloadPageAfterSubmit();
   }
 
@@ -1525,6 +1796,55 @@
     }
   }
 
+  // ---------- 管理員密碼輸入（跟上面的連線 PIN 是分開的兩組密碼） ----------
+  function openAdminPinPrompt() {
+    document.getElementById('adminPinInput').value = '';
+    document.getElementById('adminPinError').textContent = '';
+    document.getElementById('adminPinPromptOverlay').classList.remove('hidden');
+    document.getElementById('adminPinInput').focus();
+  }
+
+  function closeAdminPinPrompt() {
+    document.getElementById('adminPinPromptOverlay').classList.add('hidden');
+    pendingAdminPinRequest = false;
+  }
+
+  function grantAdminMode(pin) {
+    localStorage.setItem(ADMIN_MODE_KEY, '1');
+    localStorage.setItem(ADMIN_PIN_KEY, pin);
+    isAdminMode = true;
+    closeAdminPinPrompt();
+    showToast('管理員模式已啟用');
+    render();
+  }
+
+  async function submitAdminPin() {
+    const pin = document.getElementById('adminPinInput').value.trim();
+    if (!pin) {
+      document.getElementById('adminPinError').textContent = '請輸入密碼';
+      return;
+    }
+    if (!GAS_URL) {
+      // 本機／離線模式沒有雲端可以驗證密碼：這種情況就是你自己在本機測試或使用，不需要密碼保護。
+      grantAdminMode(pin);
+      return;
+    }
+    const submitBtn = document.getElementById('adminPinSubmit');
+    submitBtn.disabled = true;
+    try {
+      const res = await fetch(GAS_URL + '?action=checkAdmin&adminPin=' + encodeURIComponent(pin));
+      const result = await res.json();
+      if (result.ok) {
+        grantAdminMode(pin);
+      } else {
+        document.getElementById('adminPinError').textContent = '密碼不正確，請確認後再試一次';
+      }
+    } catch (err) {
+      document.getElementById('adminPinError').textContent = '連線失敗，請確認網路連線';
+    }
+    submitBtn.disabled = false;
+  }
+
   // ---------- 事件綁定 ----------
   function bindEvents() {
     document.getElementById('searchInput').addEventListener('input', (e) => {
@@ -1581,6 +1901,18 @@
     });
     document.getElementById('modalSubmit').addEventListener('click', submitModal);
 
+    document.getElementById('editItemBtn').addEventListener('click', () => {
+      if (!activeItemRef) return;
+      openEditItemModal(activeItemRef.testId, activeItemRef.group, activeItemRef.code);
+    });
+    document.getElementById('deleteItemBtn').addEventListener('click', () => {
+      document.getElementById('deleteItemConfirm').classList.remove('hidden');
+    });
+    document.getElementById('deleteItemConfirmNo').addEventListener('click', () => {
+      document.getElementById('deleteItemConfirm').classList.add('hidden');
+    });
+    document.getElementById('deleteItemConfirmYes').addEventListener('click', submitDeleteItem);
+
     document.getElementById('exportBtn').addEventListener('click', exportCurrentStock);
     document.getElementById('exportOutstandingBtn').addEventListener('click', exportOutstandingBorrows);
     document.getElementById('importFile').addEventListener('change', (e) => {
@@ -1631,6 +1963,12 @@
       }
       syncAddItemTestName();
     });
+
+    document.getElementById('adminPinSubmit').addEventListener('click', submitAdminPin);
+    document.getElementById('adminPinInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAdminPin();
+    });
+    document.getElementById('adminPinPromptClose').addEventListener('click', closeAdminPinPrompt);
   }
 
   // ---------- 初始化 ----------
@@ -1638,6 +1976,10 @@
     bindEvents();
     await loadData();
     restoreReloadState();
+    // 網址帶 ?admin=1、而且這台裝置還沒通過管理員密碼驗證的話，跳出管理員密碼輸入視窗。
+    if (pendingAdminPinRequest && !isAdminMode) {
+      openAdminPinPrompt();
+    }
     // 還沒連上雲端、且這次瀏覽階段沒按過「稍後再說」的話，跳出 PIN 輸入視窗。
     if (!isServerMode() && GAS_URL && sessionStorage.getItem(PIN_PROMPT_SKIP_KEY) !== '1') {
       openPinPrompt();

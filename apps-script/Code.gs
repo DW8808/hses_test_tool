@@ -10,13 +10,32 @@ function checkPin_(pin) {
   return !!expected && pin === expected;
 }
 
+// 管理員密碼是獨立的一組密碼，跟上面連線用的 PIN 分開存（Script Properties 的 ADMIN_PIN），
+// 一樣不會出現在任何檔案裡，只能用 setAdminPin() 在 Apps Script 編輯器裡設定。
+function checkAdminPin_(pin) {
+  var expected = PropertiesService.getScriptProperties().getProperty('ADMIN_PIN');
+  return !!expected && pin === expected;
+}
+
 function jsonOutput_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
+// GET {WEB_APP_URL}?action=checkAdmin&adminPin=xxxx  ->  { ok }
 // GET {WEB_APP_URL}?pin=xxxx  ->  { ok, generatedAt, borrowers, tests, history }
 function doGet(e) {
-  var pin = ((e && e.parameter && e.parameter.pin) || '').trim();
+  var params = (e && e.parameter) || {};
+
+  // 管理員密碼驗證跟一般連線用的 PIN 是分開的兩件事，不需要先連線成功才能檢查。
+  if (params.action === 'checkAdmin') {
+    try {
+      return jsonOutput_({ ok: checkAdminPin_(String(params.adminPin || '').trim()) });
+    } catch (err) {
+      return jsonOutput_({ ok: false, error: '伺服器錯誤：' + err.message });
+    }
+  }
+
+  var pin = (params.pin || '').trim();
   if (!checkPin_(pin)) return jsonOutput_({ ok: false, error: 'PIN 錯誤' });
 
   try {
@@ -126,10 +145,18 @@ function doPost(e) {
 
   try {
     var action = payload.action;
+    // adjust/addItem/editHistory/deleteItem/editItem 都是管理員限定的動作：連線用的 PIN 只代表
+    // 「能看/借還資料」，管理員密碼是另外一組，這裡再檢查一次，不能只靠前端畫面隱藏按鈕擋。
+    var ADMIN_ACTIONS_ = { adjust: 1, addItem: 1, editHistory: 1, deleteItem: 1, editItem: 1 };
+    if (ADMIN_ACTIONS_[action] && !checkAdminPin_(String(payload.adminPin || '').trim())) {
+      return jsonOutput_({ ok: false, error: '管理員密碼錯誤' });
+    }
     if (action === 'borrow' || action === 'return') return handleBorrowReturn_(payload);
     if (action === 'adjust') return handleAdjust_(payload);
     if (action === 'addItem') return handleAddItem_(payload);
     if (action === 'editHistory') return handleEditHistory_(payload);
+    if (action === 'deleteItem') return handleDeleteItem_(payload);
+    if (action === 'editItem') return handleEditItem_(payload);
     return jsonOutput_({ ok: false, error: '參數錯誤' });
   } catch (err) {
     return jsonOutput_({ ok: false, error: '伺服器錯誤：' + err.message });
@@ -343,6 +370,79 @@ function handleEditHistory_(payload) {
   return jsonOutput_({ ok: true });
 }
 
+// 管理員：整列刪除一個品項。History 表裡屬於這個品項的舊紀錄不會一併清掉（品項都不在了，
+// 那些紀錄不會再被任何畫面查到，留著也無害，避免多一次風險較高的批次刪除操作）。
+function handleDeleteItem_(payload) {
+  var testId = payload.testId;
+  var group = payload.group;
+  var code = payload.code;
+
+  if (!testId || !group || !code) {
+    return jsonOutput_({ ok: false, error: '參數錯誤' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var data = itemsSheet.getDataRange().getValues();
+
+  var rowIndex = findItemRow_(data, testId, group, code);
+  if (rowIndex === -1) return jsonOutput_({ ok: false, error: '找不到此品項' });
+
+  itemsSheet.deleteRow(rowIndex + 1);
+
+  return jsonOutput_({ ok: true });
+}
+
+// 管理員：編輯一個品項的代碼/是否消耗品，以及（如果測驗編號/分頁/名稱有改）連帶把同一個測驗
+// 底下所有品項的測驗編號/名稱/分頁一起更新——這三個欄位在試算表裡是每一列都重複存一份，
+// 只改被編輯的這一列會讓同一個測驗的其他品項變成「屬於不同測驗」，所以要一起處理。
+function handleEditItem_(payload) {
+  var oldTestId = payload.testId;
+  var oldGroup = payload.group;
+  var oldCode = payload.code;
+  var newTestId = payload.newTestId;
+  var newGroup = String(payload.newGroup || '').trim();
+  var newTestName = String(payload.newTestName || '').trim();
+  var newCode = String(payload.newCode || '').trim();
+  var newIsStarred = !!payload.newIsStarred;
+
+  if (!oldTestId || !oldGroup || !oldCode || !newTestId || !newGroup || !newTestName || !newCode) {
+    return jsonOutput_({ ok: false, error: '參數錯誤' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var data = itemsSheet.getDataRange().getValues();
+
+  var oldRowIndex = findItemRow_(data, oldTestId, oldGroup, oldCode);
+  if (oldRowIndex === -1) return jsonOutput_({ ok: false, error: '找不到此品項' });
+
+  for (var i = 1; i < data.length; i++) {
+    if (i === oldRowIndex) continue;
+    if (String(data[i][0]) === String(newTestId) && data[i][2] === newGroup && data[i][3] === newCode) {
+      return jsonOutput_({ ok: false, error: '這個測驗底下已經有相同的項目代碼了' });
+    }
+  }
+
+  var identityChanged = String(newTestId) !== String(oldTestId) || newGroup !== oldGroup;
+  if (identityChanged) {
+    for (var r = 1; r < data.length; r++) {
+      if (r === oldRowIndex) continue;
+      if (String(data[r][0]) === String(oldTestId) && data[r][2] === oldGroup) {
+        var siblingRow = r + 1;
+        itemsSheet.getRange(siblingRow, 3, 1, 1).setNumberFormat('@');
+        itemsSheet.getRange(siblingRow, 1, 1, 3).setValues([[newTestId, newTestName, newGroup]]);
+      }
+    }
+  }
+
+  var sheetRow = oldRowIndex + 1;
+  itemsSheet.getRange(sheetRow, 3, 1, 2).setNumberFormat('@'); // group/itemCode 欄位維持文字格式
+  itemsSheet.getRange(sheetRow, 1, 1, 5).setValues([[newTestId, newTestName, newGroup, newCode, newIsStarred]]);
+
+  return jsonOutput_({ ok: true });
+}
+
 // ---------- 一次性設定：只需要在 Apps Script 編輯器裡執行這兩個函式各一次 ----------
 
 // 建立 Items / History / Borrowers 三個分頁並匯入清冊資料。
@@ -385,6 +485,14 @@ function setPin() {
   var pin = '請改成一組只有你自己知道的密碼';
   PropertiesService.getScriptProperties().setProperty('PIN', pin);
   Logger.log('PIN 已設定完成。');
+}
+
+// 設定管理員密碼——跟上面的連線 PIN 是兩組不同的密碼。一樣不要把真正的密碼寫進這個檔案，
+// 這裡只是放一個佔位字串，改成你要的密碼後在 Apps Script 編輯器裡執行這個函式一次即可。
+function setAdminPin() {
+  var pin = '請改成管理員密碼';
+  PropertiesService.getScriptProperties().setProperty('ADMIN_PIN', pin);
+  Logger.log('管理員密碼已設定完成。');
 }
 
 // 一次性修復：舊版程式用 appendRow 寫入 History，把 group 欄位（例如 "1-10"）誤存成日期。
