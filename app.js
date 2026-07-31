@@ -630,6 +630,14 @@
       return;
     }
 
+    if (!isStarred && activeAction === 'return') {
+      const outstandingQty = getOutstandingQty(found.test, found.item);
+      if (outstandingQty !== null && qty > outstandingQty) {
+        showToast(`歸還數量超過借出中的數量（借出中共 ${outstandingQty} 件）`);
+        return;
+      }
+    }
+
     const submitBtn = document.getElementById('modalSubmit');
     submitBtn.disabled = true;
 
@@ -643,7 +651,7 @@
         }
         showToast(actionSuccessMessage(isStarred, activeAction));
         closeModal();
-        await loadData(); // 重新拉取最新資料，確保跟其他裝置一致
+        reloadPageAfterSubmit();
       } catch (err) {
         showToast('連線失敗，請確認網路連線');
         submitBtn.disabled = false;
@@ -678,8 +686,14 @@
     saveAdjustments();
 
     showToast(actionSuccessMessage(isStarred, activeAction));
-    render();
     closeModal();
+    reloadPageAfterSubmit();
+  }
+
+  // 確認送出成功後一律重新整理整頁（而不是只用 JS 重新渲染），確保畫面狀態完全乾淨。
+  // 延遲一下才重整，讓上面的成功提示（toast）至少能被看到一瞬間。
+  function reloadPageAfterSubmit() {
+    setTimeout(() => window.location.reload(), 600);
   }
 
   function showToast(msg) {
@@ -734,6 +748,15 @@
   function isCurrentlyBorrowed(test, item) {
     if (item.isStarred) return !!item.borrower;
     return getOutstandingLoans(test.id, test.group, item.code, item).length > 0;
+  }
+
+  // 借還品專用：算出目前實際「借出中尚未歸還」的件數，擋掉一次歸還超過這個數量的操作。
+  // 若舊資料只知道有人借走、但沒有異動紀錄可還原出確切件數，回傳 null 代表無法判斷、不擋。
+  function getOutstandingQty(test, item) {
+    const loans = getOutstandingLoans(test.id, test.group, item.code, item);
+    if (loans.length === 0) return 0;
+    if (loans.some((l) => l.remaining === null)) return null;
+    return loans.reduce((sum, l) => sum + l.remaining, 0);
   }
 
   function exportOutstandingBorrows() {
