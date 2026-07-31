@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>華勛國小測驗工具管理系統</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍵</text></svg>">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-icon">🍵</span>
+        <div class="brand-text">
+          <h1>華勛國小測驗工具管理系統</h1>
+          <p>測驗工具清冊 &amp; 庫存計算</p>
+        </div>
+      </div>
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input id="searchInput" type="text" placeholder="搜尋測驗名稱、項目編號或關鍵字..." autocomplete="off" />
+      </div>
+      <div class="topbar-actions">
+        <label class="btn btn-ghost" for="importFile" id="importFileLabel">📥 匯入 Excel</label>
+        <input type="file" id="importFile" accept=".xlsx,.xls" hidden />
+        <button class="btn btn-ghost" id="exportBtn">📤 匯出目前庫存</button>
+        <button class="btn btn-ghost" id="exportOutstandingBtn">📋 匯出未歸還清單</button>
+        <button class="btn btn-ghost hidden" id="refreshBtn">🔄 重新整理</button>
+        <button class="btn btn-ghost" id="connectionBtn">⚙️ 連線設定</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="dashboard" id="dashboard">
+      <div class="card stat-card">
+        <div class="stat-icon">📚</div>
+        <div class="stat-body">
+          <div class="stat-value" id="statTestCount">-</div>
+          <div class="stat-label">測驗工具種類</div>
+        </div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-icon">🧾</div>
+        <div class="stat-body">
+          <div class="stat-value" id="statItemCount">-</div>
+          <div class="stat-label">品項總數</div>
+        </div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-icon">📦</div>
+        <div class="stat-body">
+          <div class="stat-value" id="statTotalStock">-</div>
+          <div class="stat-label">總庫存件數</div>
+        </div>
+      </div>
+      <div class="card stat-card warn-card" id="lowStockCard">
+        <div class="stat-icon">⚠️</div>
+        <div class="stat-body">
+          <div class="stat-value" id="statLowStock">-</div>
+          <div class="stat-label">
+            庫存警示（≤
+            <input type="number" id="thresholdInput" min="0" value="5" />
+            件）
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="filter-bar card">
+      <div class="filter-group" id="groupTags">
+        <span class="filter-label">分頁：</span>
+        <button class="tag tag-active" data-group="all">全部</button>
+      </div>
+      <div class="filter-group">
+        <label class="checkbox-label">
+          <input type="checkbox" id="lowStockOnly" />
+          只顯示低庫存
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="starredOnly" />
+          只顯示標示 * 項目
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="borrowedOnly" />
+          只顯示已借出
+        </label>
+      </div>
+    </section>
+
+    <section id="resultMeta" class="result-meta"></section>
+
+    <section id="testList" class="test-list"></section>
+
+    <p class="footnote" id="dataMeta"></p>
+  </main>
+
+  <!-- 借還 / 庫存異動 Modal -->
+  <div id="modalOverlay" class="modal-overlay hidden">
+    <div class="modal card">
+      <button class="modal-close" id="modalClose">✕</button>
+      <h3 id="modalTitle">庫存異動</h3>
+      <p class="modal-subtitle" id="modalSubtitle"></p>
+
+      <div class="modal-field">
+        <label>異動類型</label>
+        <div class="segmented">
+          <button class="seg-btn seg-active" data-action="borrow">📤 借出 / 消耗</button>
+          <button class="seg-btn" data-action="return">📥 歸還 / 購買</button>
+        </div>
+      </div>
+
+      <div class="modal-field">
+        <label for="modalQty">數量</label>
+        <input type="number" id="modalQty" min="1" value="1" />
+      </div>
+
+      <div class="modal-field" id="borrowerField">
+        <label for="modalPerson">借用者</label>
+        <select id="modalPerson"></select>
+        <input type="text" id="modalPersonOther" placeholder="請輸入姓名" style="display:none; margin-top:0.5rem;" />
+      </div>
+
+      <div class="modal-field">
+        <label>目前庫存</label>
+        <div class="modal-current-stock" id="modalCurrentStock">-</div>
+      </div>
+
+      <button class="btn btn-primary modal-submit" id="modalSubmit">確認送出</button>
+
+      <div class="modal-history" id="modalHistory"></div>
+    </div>
+  </div>
+
+  <!-- 雲端連線設定 Modal -->
+  <div id="connectionModalOverlay" class="modal-overlay hidden">
+    <div class="modal card">
+      <button class="modal-close" id="connectionModalClose">✕</button>
+      <h3>⚙️ 連線設定</h3>
+      <p class="modal-subtitle">設定後，借還/庫存資料會同步到 Google 試算表，任何裝置都能看到同一份資料。詳細設定步驟請見專案裡的 SETUP.md。</p>
+
+      <div class="modal-field">
+        <label for="connUrl">Web App 網址</label>
+        <input type="text" id="connUrl" placeholder="https://script.google.com/macros/s/.../exec" />
+      </div>
+
+      <div class="modal-field">
+        <label for="connPin">PIN</label>
+        <input type="text" id="connPin" placeholder="通關密碼" />
+      </div>
+
+      <button class="btn btn-primary modal-submit" id="connectionSaveBtn">儲存並連線</button>
+      <button class="btn btn-ghost" id="connectionDisconnectBtn" style="width:100%; margin-top:0.6rem;">取消連線（退回本機模式）</button>
+
+      <p class="modal-subtitle" id="connectionStatus" style="margin-top:1rem;"></p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

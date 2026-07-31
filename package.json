@@ -1,0 +1,11 @@
+{
+  "name": "school-test-tool",
+  "private": true,
+  "scripts": {
+    "parse": "node scripts/parse_excel.js",
+    "seed": "node scripts/generate_seed.js"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}
