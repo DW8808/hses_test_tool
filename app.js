@@ -40,6 +40,12 @@
     return !!(connection && connection.url && connection.pin);
   }
 
+  // 有設定雲端網址、但這台裝置還沒成功連線時，畫面要完全鎖住不顯示任何庫存資料。
+  // 如果根本沒設定 GAS_URL（config.js 是空的），代表就是要單純本機模式使用，不鎖。
+  function isLocked() {
+    return !isServerMode() && !!GAS_URL;
+  }
+
   // ---------- 雲端連線設定持久化 ----------
   // 網址只用來開關「⚙️ 連線設定」按鈕：加 ?admin=1 才會顯示，避免老師不小心誤按到取消連線。
   // Apps Script 網址固定在 config.js，不會出現在任何連結裡。
@@ -243,6 +249,7 @@
   }
 
   function renderStats() {
+    if (isLocked()) return;
     const s = computeStats();
     document.getElementById('statTestCount').textContent = s.testCount;
     document.getElementById('statItemCount').textContent = s.itemCount;
@@ -251,6 +258,7 @@
   }
 
   function renderTestList() {
+    if (isLocked()) return;
     const container = document.getElementById('testList');
     const resultMeta = document.getElementById('resultMeta');
     const cards = [];
@@ -359,6 +367,10 @@
 
   function renderDataMeta() {
     const el = document.getElementById('dataMeta');
+    if (isLocked()) {
+      el.textContent = '';
+      return;
+    }
     const time = baseData.generatedAt ? new Date(baseData.generatedAt).toLocaleString('zh-TW') : '未知';
     if (isServerMode()) {
       el.textContent = `資料來源：${baseData.sourceFile} ｜ 最後同步：${time} ｜ 所有裝置共用同一份資料`;
@@ -369,16 +381,32 @@
 
   function updateModeUI() {
     const serverMode = isServerMode();
+    const locked = isLocked();
+
     document.getElementById('refreshBtn').classList.toggle('hidden', !serverMode);
-    document.getElementById('importFileLabel').classList.toggle('hidden', serverMode);
+    document.getElementById('importFileLabel').classList.toggle('hidden', serverMode || locked);
     // 連線設定按鈕只在網址帶 ?admin=1 時顯示，避免一般使用者誤按到取消連線。
     document.getElementById('connectionBtn').classList.toggle('hidden', !isAdminMode);
     // 還沒連線（例如剛剛按了「稍後再說」）的話，一般使用者也能看到這顆按鈕，隨時點回去輸入 PIN。
     document.getElementById('connectNowBtn').classList.toggle('hidden', serverMode || !GAS_URL);
+
+    // 設定了雲端網址但還沒連線時，畫面完全鎖住，不顯示任何庫存資料、不能匯出。
+    document.getElementById('lockedState').classList.toggle('hidden', !locked);
+    document.getElementById('dashboard').classList.toggle('hidden', locked);
+    document.getElementById('filterBar').classList.toggle('hidden', locked);
+    document.getElementById('resultMeta').classList.toggle('hidden', locked);
+    document.getElementById('testList').classList.toggle('hidden', locked);
+    document.getElementById('searchWrap').classList.toggle('hidden', locked);
+    document.getElementById('exportBtn').classList.toggle('hidden', locked);
+    document.getElementById('exportOutstandingBtn').classList.toggle('hidden', locked);
   }
 
   function render() {
     updateModeUI();
+    if (isLocked()) {
+      renderDataMeta();
+      return;
+    }
     renderGroupTags();
     renderStats();
     renderTestList();

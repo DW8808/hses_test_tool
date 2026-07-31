@@ -17,7 +17,7 @@
           <p>測驗工具清冊 &amp; 庫存計算</p>
         </div>
       </div>
-      <div class="search-wrap">
+      <div class="search-wrap" id="searchWrap">
         <span class="search-icon">🔍</span>
         <input id="searchInput" type="text" placeholder="搜尋測驗名稱、項目編號或關鍵字..." autocomplete="off" />
       </div>
@@ -34,6 +34,10 @@
   </header>
 
   <main class="container">
+    <div id="lockedState" class="card empty-state hidden" style="padding: 3.5rem 1.5rem; text-align: center;">
+      🔒 請先輸入密碼才能查看測驗工具庫存資料。
+    </div>
+
     <section class="dashboard" id="dashboard">
       <div class="card stat-card">
         <div class="stat-icon">📚</div>
@@ -69,7 +73,7 @@
       </div>
     </section>
 
-    <section class="filter-bar card">
+    <section class="filter-bar card" id="filterBar">
       <div class="filter-group" id="groupTags">
         <span class="filter-label">分頁：</span>
         <button class="tag tag-active" data-group="all">全部</button>
@@ -175,7 +179,7 @@
       </div>
 
       <button class="btn btn-primary modal-submit" id="pinPromptSubmit">確認</button>
-      <button class="btn btn-ghost" id="pinPromptSkip" style="width:100%; margin-top:0.6rem;">稍後再說（先看離線資料）</button>
+      <button class="btn btn-ghost" id="pinPromptSkip" style="width:100%; margin-top:0.6rem;">稍後再說</button>
       <p class="modal-subtitle" id="pinPromptError" style="margin-top:0.8rem; color: var(--warn);"></p>
     </div>
   </div>
