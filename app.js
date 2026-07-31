@@ -1034,9 +1034,13 @@
     }
 
     if (!isStarred && activeAction === 'return') {
-      const outstandingQty = getOutstandingQty(found.test, found.item);
-      if (outstandingQty !== null && qty > outstandingQty) {
-        showToast(`歸還數量超過借出中的數量（借出中共 ${outstandingQty} 件）`);
+      const personOutstandingQty = getOutstandingQtyForPerson(found.test, found.item, person);
+      if (personOutstandingQty === 0) {
+        showToast(`${person} 目前沒有借出中的這個項目，不能歸還`);
+        return;
+      }
+      if (personOutstandingQty !== null && qty > personOutstandingQty) {
+        showToast(`歸還數量超過 ${person} 借出中的數量（借出中共 ${personOutstandingQty} 件）`);
         return;
       }
     }
@@ -1307,10 +1311,11 @@
     return getOutstandingLoans(test.id, test.group, item.code, item).length > 0;
   }
 
-  // 借還品專用：算出目前實際「借出中尚未歸還」的件數，擋掉一次歸還超過這個數量的操作。
-  // 若舊資料只知道有人借走、但沒有異動紀錄可還原出確切件數，回傳 null 代表無法判斷、不擋。
-  function getOutstandingQty(test, item) {
-    const loans = getOutstandingLoans(test.id, test.group, item.code, item);
+  // 借還品專用：算出「這個人」目前借出中尚未歸還的件數——誰借誰還，沒借的人不能還，
+  // 有借的人也不能還超過自己借的數量。回傳 0 代表這個人名下沒有任何未歸還批次（該擋）；
+  // 若舊資料只知道有人借走、沒有異動紀錄可還原出確切件數，回傳 null 代表無法判斷數量上限、不擋。
+  function getOutstandingQtyForPerson(test, item, person) {
+    const loans = getOutstandingLoans(test.id, test.group, item.code, item).filter((l) => l.borrower === person);
     if (loans.length === 0) return 0;
     if (loans.some((l) => l.remaining === null)) return null;
     return loans.reduce((sum, l) => sum + l.remaining, 0);
