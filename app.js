@@ -199,7 +199,7 @@
     if (state.group !== 'all' && test.group !== state.group) return false;
     if (state.lowStockOnly && !(item.currentStock !== null && item.currentStock <= state.threshold)) return false;
     if (state.starredOnly && !item.isStarred) return false;
-    if (state.borrowedOnly && !item.borrower) return false;
+    if (state.borrowedOnly && !isCurrentlyBorrowed(test, item)) return false;
     if (state.search) {
       const q = state.search.toLowerCase();
       const haystack = (test.name + ' ' + item.code + ' ' + test.id).toLowerCase();
@@ -482,6 +482,9 @@
 
   // 借還品專用：把「借出/歸還」事件依時間序配對成一筆筆借出批次（FIFO）。
   // 例：先借1件、再借2件 => 兩筆未歸還批次；之後一次歸還3件 => 依序沖銷，兩筆都標記為已歸還。
+  // 歸還時優先沖銷「同一位借用者」自己名下尚未歸還的批次（同樣依借出時間 FIFO）；
+  // 只有在歸還者沒填、或名下已無未歸還批次時（例如代還、或忘記填名字），才退回全體 FIFO，
+  // 避免 A、B 兩人各自借出未還時，A 拿去還的數量被誤記到 B 更早的那筆借出上。
   function buildLoanCycles(history) {
     const loans = [];
     for (const h of history) {
@@ -490,7 +493,9 @@
         continue;
       }
       let remainingToApply = h.qty;
-      for (const loan of loans) {
+      const ownLoans = h.person ? loans.filter((l) => l.remaining > 0 && l.borrower === h.person) : [];
+      const targets = ownLoans.length > 0 ? ownLoans : loans;
+      for (const loan of targets) {
         if (remainingToApply <= 0) break;
         if (loan.remaining <= 0) continue;
         const amt = Math.min(remainingToApply, loan.remaining);
@@ -721,6 +726,14 @@
       return [{ qty: null, remaining: null, borrower: effItem.borrower, borrowedAt: null }];
     }
     return [];
+  }
+
+  // 「只顯示已借出」篩選用：消耗品用 item.borrower 當作目前使用者的簡易標記；
+  // 借還品不能直接看 item.borrower，因為歸還後（即使只還一部分）該欄位就會被清空，
+  // 必須改用 getOutstandingLoans 還原實際尚未歸還的批次，否則部分歸還後這個品項會從清單消失。
+  function isCurrentlyBorrowed(test, item) {
+    if (item.isStarred) return !!item.borrower;
+    return getOutstandingLoans(test.id, test.group, item.code, item).length > 0;
   }
 
   function exportOutstandingBorrows() {
