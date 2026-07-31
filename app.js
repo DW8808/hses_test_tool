@@ -1,6 +1,12 @@
 (function () {
   'use strict';
 
+  // 關掉瀏覽器內建的「重新整理自動還原捲動位置」，改由我們自己在 restoreReloadState() 精準控制，
+  // 避免瀏覽器原生還原（時機不固定，尤其雲端模式資料是非同步載入）跟我們自己的 scrollTo 互相打架。
+  if ('scrollRestoration' in history) {
+    history.scrollRestoration = 'manual';
+  }
+
   const STORAGE_KEY = 'schoolTestTool.adjustments.v1';
   const CONNECTION_KEY = 'schoolTestTool.connection.v1';
   const PIN_PROMPT_SKIP_KEY = 'schoolTestTool.pinPromptSkipped';
@@ -722,25 +728,39 @@
       return;
     }
 
-    state.search = snapshot.search || '';
-    state.group = snapshot.group || 'all';
-    state.lowStockOnly = !!snapshot.lowStockOnly;
-    state.starredOnly = !!snapshot.starredOnly;
-    state.borrowedOnly = !!snapshot.borrowedOnly;
-    state.threshold = typeof snapshot.threshold === 'number' ? snapshot.threshold : LOW_STOCK_DEFAULT;
+    // 還原篩選條件、重新渲染這段包在 try 裡：就算這裡發生非預期錯誤，
+    // 下面還原捲動位置的部分還是要執行，不能因為前面出錯就整個放棄捲回原位。
+    try {
+      state.search = snapshot.search || '';
+      state.group = snapshot.group || 'all';
+      state.lowStockOnly = !!snapshot.lowStockOnly;
+      state.starredOnly = !!snapshot.starredOnly;
+      state.borrowedOnly = !!snapshot.borrowedOnly;
+      state.threshold = typeof snapshot.threshold === 'number' ? snapshot.threshold : LOW_STOCK_DEFAULT;
 
-    document.getElementById('searchInput').value = state.search;
-    document.getElementById('thresholdInput').value = state.threshold;
-    document.getElementById('lowStockOnly').checked = state.lowStockOnly;
-    document.getElementById('starredOnly').checked = state.starredOnly;
-    document.getElementById('borrowedOnly').checked = state.borrowedOnly;
+      document.getElementById('searchInput').value = state.search;
+      document.getElementById('thresholdInput').value = state.threshold;
+      document.getElementById('lowStockOnly').checked = state.lowStockOnly;
+      document.getElementById('starredOnly').checked = state.starredOnly;
+      document.getElementById('borrowedOnly').checked = state.borrowedOnly;
 
-    render();
-
-    if (typeof snapshot.scrollY === 'number') {
-      // 用 rAF 等清單真的畫完、把頁面撐開之後再捲動，不然頁面還沒那麼高，捲動會被瀏覽器夾住。
-      requestAnimationFrame(() => window.scrollTo(0, snapshot.scrollY));
+      render();
+    } catch (err) {
+      console.error('[schoolTestTool] 還原搜尋／篩選條件時發生錯誤：', err);
     }
+
+    if (typeof snapshot.scrollY !== 'number') return;
+
+    // 雲端模式資料是非同步從 Apps Script 抓回來的，畫面撐開的時間點比本機模式晚也較不固定，
+    // 只捲一次可能太早（清單那時還沒撐開，捲動會被瀏覽器夾在目前的頁面高度）。
+    // 用同一個 rAF 內連續嘗試幾次、間隔拉長，確保清單完全撐開後至少還會再捲一次。
+    let attempts = 0;
+    function attemptScroll() {
+      attempts++;
+      window.scrollTo(0, snapshot.scrollY);
+      if (attempts < 5) setTimeout(() => requestAnimationFrame(attemptScroll), attempts * 150);
+    }
+    requestAnimationFrame(attemptScroll);
   }
 
   function showToast(msg) {
