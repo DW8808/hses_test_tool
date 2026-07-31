@@ -11,6 +11,8 @@
   const CONNECTION_KEY = 'schoolTestTool.connection.v1';
   const PIN_PROMPT_SKIP_KEY = 'schoolTestTool.pinPromptSkipped';
   const RELOAD_STATE_KEY = 'schoolTestTool.reloadState.v1';
+  const CUSTOM_KEY = 'schoolTestTool.customTests.v1';
+  const ADMIN_MODE_KEY = 'schoolTestTool.adminMode.v1';
   const LOW_STOCK_DEFAULT = 5;
 
   /** @type {{generatedAt:string, sourceFile:string, borrowers:string[], tests:Array}} */
@@ -19,10 +21,16 @@
   // 本機模式：本機異動紀錄： { "測驗id::項目code": { returnPurchaseQty, borrowConsumeQty, currentStock, borrower, returner, history: [...] } }
   let adjustments = {};
 
+  // 本機模式：管理員手動新增的測驗／項目（雲端模式不用這個，直接寫進 Google 試算表）。
+  // key："測驗編號::分頁" -> { id, group, name, items: [...] }。合併進 baseData.tests 時，
+  // 對到既有測驗就把 items 併進去，對不到就整筆推一個新測驗進去。
+  let customTests = {};
+
   // 雲端模式：伺服器回傳的歷史紀錄： { "測驗id::項目code": [ {action, qty, person, at}, ... ] }
   let historyMap = {};
 
-  // 是否顯示「連線設定」按鈕：只有網址帶 ?admin=1 時才顯示，避免老師不小心誤按到連線設定或取消連線。
+  // 是否顯示管理員專用功能（連線設定、新增測驗/項目、調整庫存、編輯異動紀錄）。
+  // 用 ?admin=1 開過一次後會記在這台裝置的 localStorage 裡，避免每次整頁重新整理就消失。
   let isAdminMode = false;
 
   // Google Apps Script 網址固定寫在 config.js 裡（見該檔案），不透過網址參數傳遞。
@@ -41,7 +49,12 @@
   };
 
   let activeItemRef = null; // { testId, code, isStarred }
-  let activeAction = 'borrow';
+  let activeAction = 'borrow'; // 'borrow' | 'return' | 'adjust'（'adjust' 僅管理員可選）
+
+  // 管理員：原始異動紀錄目前正在編輯/確認刪除中的那一筆（用 at 時間戳記辨識），
+  // 只會有一筆同時處在其中一種狀態，切換編輯目標或關掉 Modal 時要記得清空。
+  let editingHistoryAt = null;
+  let confirmingDeleteAt = null;
 
   function isServerMode() {
     return !!(connection && connection.url && connection.pin);
@@ -56,9 +69,20 @@
   // ---------- 雲端連線設定持久化 ----------
   // 網址只用來開關「⚙️ 連線設定」按鈕：加 ?admin=1 才會顯示，避免老師不小心誤按到取消連線。
   // Apps Script 網址固定在 config.js，不會出現在任何連結裡。
+  //
+  // 一旦用 ?admin=1 打開過，就把這台裝置標記成管理員（存 localStorage），之後不用每次都帶參數；
+  // 這一步是必要的：管理員操作（新增測驗/調整庫存/編輯紀錄）送出後都會整頁重新整理，
+  // 如果只看網址參數，第一次載入時 history.replaceState 就會把 ?admin=1 從網址列拿掉，
+  // 導致下一次重整（也就是每次操作完）管理員身分就消失了。
   function applyAdminFlagFromUrl() {
     const params = new URLSearchParams(window.location.search);
-    isAdminMode = params.get('admin') === '1';
+    if (params.get('admin') === '1') {
+      localStorage.setItem(ADMIN_MODE_KEY, '1');
+    } else if (params.get('admin') === '0') {
+      // 退出管理員模式用：這台裝置如果不小心點到 ?admin=1 的連結，用 ?admin=0 開一次就能取消標記。
+      localStorage.removeItem(ADMIN_MODE_KEY);
+    }
+    isAdminMode = localStorage.getItem(ADMIN_MODE_KEY) === '1';
     if (params.toString()) {
       const url = new URL(window.location.href);
       url.search = '';
@@ -94,6 +118,36 @@
 
   function saveAdjustments() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(adjustments));
+  }
+
+  // ---------- 本機模式：管理員新增的測驗／項目 ----------
+  function loadCustomTests() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveCustomTests() {
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(customTests));
+  }
+
+  // 把管理員新增的測驗／項目合併進 baseData.tests。呼叫前 baseData.tests（跟每個 test 的
+  // items）要先淺拷貝過，不能直接改到 window.TEST_TOOL_DATA 那個唯讀的原始資料物件。
+  function applyCustomTests() {
+    for (const key in customTests) {
+      const custom = customTests[key];
+      const existing = baseData.tests.find((t) => t.id === custom.id && t.group === custom.group);
+      if (existing) {
+        existing.items = existing.items.concat(custom.items);
+      } else {
+        baseData.tests.push({ id: custom.id, name: custom.name, group: custom.group, items: custom.items.slice() });
+      }
+    }
+    // 跟雲端模式的 doGet() 一樣依編號、分頁排序，避免新增的測驗永遠被塞在清單最後面。
+    baseData.tests.sort((a, b) => a.id - b.id || String(a.group).localeCompare(String(b.group)));
   }
 
   // 來源清冊裡編號 18/19/20 因為在兩個分頁（11-20、21-30）重複出現，
@@ -162,8 +216,15 @@
         return false;
       }
     } else {
-      baseData = window.TEST_TOOL_DATA || { generatedAt: '', sourceFile: '', borrowers: [], tests: [] };
+      const raw = window.TEST_TOOL_DATA || { generatedAt: '', sourceFile: '', borrowers: [], tests: [] };
+      // 淺拷貝 tests／每個 test 的 items，因為接下來 applyCustomTests() 會直接改這些陣列，
+      // 不能動到 window.TEST_TOOL_DATA 本身（那是唯讀的原始解析資料，重整後應該要維持乾淨）。
+      baseData = Object.assign({}, raw, {
+        tests: raw.tests.map((t) => Object.assign({}, t, { items: t.items.slice() })),
+      });
       adjustments = loadAdjustments();
+      customTests = loadCustomTests();
+      applyCustomTests();
     }
     renderBorrowerList();
     render();
@@ -405,8 +466,9 @@
 
     document.getElementById('refreshBtn').classList.toggle('hidden', !serverMode);
     document.getElementById('importFileLabel').classList.toggle('hidden', serverMode || locked);
-    // 連線設定按鈕只在網址帶 ?admin=1 時顯示，避免一般使用者誤按到取消連線。
+    // 連線設定、新增測驗/項目按鈕只在網址帶 ?admin=1 時顯示，避免一般使用者誤按到。
     document.getElementById('connectionBtn').classList.toggle('hidden', !isAdminMode);
+    document.getElementById('addItemBtn').classList.toggle('hidden', !isAdminMode || locked);
     // 還沒連線（例如剛剛按了「稍後再說」）的話，一般使用者也能看到這顆按鈕，隨時點回去輸入 PIN。
     document.getElementById('connectNowBtn').classList.toggle('hidden', serverMode || !GAS_URL);
 
@@ -487,6 +549,45 @@
     return new Date(at).toLocaleString('zh-TW');
   }
 
+  // 單一異動紀錄對「目前庫存」造成的影響：+ 表示庫存增加、- 表示減少。
+  // borrow/return 的 qty 一定是正數（數量），adjust 的 qty 本身已經是有正負號的異動量。
+  // 編輯或刪除某一筆舊紀錄時，用這個函式先反向沖銷舊值、再套用新值，
+  // 就不需要知道這個品項「最初」的庫存基準值（雲端試算表其實也沒有保留這個值）。
+  function historyEntryDelta(entry) {
+    if (entry.action === 'borrow') return -entry.qty;
+    if (entry.action === 'return') return entry.qty;
+    if (entry.action === 'adjust') return entry.qty;
+    return 0;
+  }
+
+  // 本機模式：管理員刪除/編輯某一品項 history 陣列裡的一筆舊紀錄，用 at（毫秒時間戳記）辨識是哪一筆
+  // ——同一品項不可能有兩筆時間完全相同（毫秒級）的紀錄，不需要額外的 id 欄位。
+  function deleteHistoryEntryLocal(testId, group, code, at) {
+    const k = keyFor(testId, group, code);
+    const current = adjustments[k];
+    if (!current) return;
+    const idx = current.history.findIndex((h) => h.at === at);
+    if (idx === -1) return;
+    const removed = current.history[idx];
+    if (current.currentStock !== null) current.currentStock -= historyEntryDelta(removed);
+    current.history.splice(idx, 1);
+    saveAdjustments();
+  }
+
+  function editHistoryEntryLocal(testId, group, code, at, newAction, newQty, newPerson) {
+    const k = keyFor(testId, group, code);
+    const current = adjustments[k];
+    if (!current) return;
+    const idx = current.history.findIndex((h) => h.at === at);
+    if (idx === -1) return;
+    const old = current.history[idx];
+    if (current.currentStock !== null) current.currentStock -= historyEntryDelta(old);
+    const updated = { action: newAction, qty: newQty, person: newPerson, at: old.at };
+    if (current.currentStock !== null) current.currentStock += historyEntryDelta(updated);
+    current.history[idx] = updated;
+    saveAdjustments();
+  }
+
   // 借還品專用：把「借出/歸還」事件依時間序配對成一筆筆借出批次（FIFO）。
   // 例：先借1件、再借2件 => 兩筆未歸還批次；之後一次歸還3件 => 依序沖銷，兩筆都標記為已歸還。
   // 歸還時優先沖銷「同一位借用者」自己名下尚未歸還的批次（同樣依借出時間 FIFO）；
@@ -495,6 +596,9 @@
   function buildLoanCycles(history) {
     const loans = [];
     for (const h of history) {
+      // 管理員的庫存調整（action:'adjust'）不是一次借出/歸還事件，跳過，
+      // 不然會被下面的 else 分支誤當成「歸還」去沖銷別人的借出批次。
+      if (h.action !== 'borrow' && h.action !== 'return') continue;
       if (h.action === 'borrow') {
         loans.push({ qty: h.qty, remaining: h.qty, borrower: h.person, borrowedAt: h.at, returnedAt: null, returners: [] });
         continue;
@@ -515,12 +619,105 @@
     return loans;
   }
 
+  function historyActionLabel(action) {
+    if (action === 'borrow') return '借出/消耗';
+    if (action === 'return') return '歸還/補充';
+    return '管理員調整';
+  }
+
+  // 管理員專用：把「原始」異動紀錄（不分 starred，一筆一筆，不像上面那樣分組彙整）列出來，
+  // 每筆都能編輯／刪除。一般使用者看到的分組畫面沒辦法對應回單一一筆，所以另外做這個區塊。
+  function renderAdminHistorySection(history) {
+    if (!isAdminMode) return '';
+    const rows = history
+      .slice()
+      .reverse()
+      .map((h) => {
+        if (editingHistoryAt === h.at) {
+          return `
+            <div class="admin-history-row admin-history-editing" data-at="${h.at}">
+              <select class="admin-edit-action">
+                <option value="borrow" ${h.action === 'borrow' ? 'selected' : ''}>借出/消耗</option>
+                <option value="return" ${h.action === 'return' ? 'selected' : ''}>歸還/補充</option>
+                <option value="adjust" ${h.action === 'adjust' ? 'selected' : ''}>管理員調整</option>
+              </select>
+              <input type="number" class="admin-edit-qty" value="${h.qty}" />
+              <input type="text" class="admin-edit-person" value="${escapeHtml(h.person || '')}" placeholder="人員" />
+              <div class="admin-history-actions">
+                <button class="btn-sm btn-sm-primary admin-save-btn" data-at="${h.at}">儲存</button>
+                <button class="btn-sm admin-cancel-edit-btn">取消</button>
+              </div>
+            </div>`;
+        }
+        if (confirmingDeleteAt === h.at) {
+          return `
+            <div class="admin-history-row">
+              <span>確定要刪除這筆紀錄嗎？</span>
+              <div class="admin-history-actions">
+                <button class="btn-sm btn-sm-danger admin-confirm-delete-btn" data-at="${h.at}">是，刪除</button>
+                <button class="btn-sm admin-cancel-delete-btn">否</button>
+              </div>
+            </div>`;
+        }
+        const qtyLabel = h.action === 'adjust' && h.qty > 0 ? `+${h.qty}` : h.qty;
+        return `
+          <div class="admin-history-row">
+            <span>${historyActionLabel(h.action)} ${qtyLabel} 件${h.person ? '（' + escapeHtml(h.person) + '）' : ''} ／ ${formatTime(h.at)}</span>
+            <div class="admin-history-actions">
+              <button class="icon-btn-sm admin-edit-btn" data-at="${h.at}" title="編輯">✏️</button>
+              <button class="icon-btn-sm admin-delete-btn" data-at="${h.at}" title="刪除">🗑️</button>
+            </div>
+          </div>`;
+      })
+      .join('');
+    return `<div class="admin-history"><h4>⚙️ 原始異動紀錄（管理員）</h4>${rows}</div>`;
+  }
+
+  function bindAdminHistoryEvents() {
+    if (!isAdminMode) return;
+    const wrap = document.getElementById('modalHistory');
+    wrap.querySelectorAll('.admin-edit-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        editingHistoryAt = Number(btn.dataset.at);
+        confirmingDeleteAt = null;
+        renderModalHistory();
+      });
+    });
+    wrap.querySelectorAll('.admin-delete-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        confirmingDeleteAt = Number(btn.dataset.at);
+        editingHistoryAt = null;
+        renderModalHistory();
+      });
+    });
+    wrap.querySelectorAll('.admin-cancel-edit-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        editingHistoryAt = null;
+        renderModalHistory();
+      });
+    });
+    wrap.querySelectorAll('.admin-cancel-delete-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        confirmingDeleteAt = null;
+        renderModalHistory();
+      });
+    });
+    wrap.querySelectorAll('.admin-save-btn').forEach((btn) => {
+      btn.addEventListener('click', () => submitHistoryEdit(Number(btn.dataset.at)));
+    });
+    wrap.querySelectorAll('.admin-confirm-delete-btn').forEach((btn) => {
+      btn.addEventListener('click', () => submitHistoryDelete(Number(btn.dataset.at)));
+    });
+  }
+
   function renderModalHistory() {
     const wrap = document.getElementById('modalHistory');
     if (!activeItemRef) return;
     const history = getHistory(activeItemRef.testId, activeItemRef.group, activeItemRef.code);
+    const adminSection = renderAdminHistorySection(history);
     if (!history.length) {
-      wrap.innerHTML = `<h4>異動紀錄</h4><div class="history-empty">尚無異動紀錄</div>`;
+      wrap.innerHTML = `<h4>異動紀錄</h4><div class="history-empty">尚無異動紀錄</div>${adminSection}`;
+      bindAdminHistoryEvents();
       return;
     }
     const isStarred = activeItemRef.isStarred;
@@ -530,11 +727,13 @@
         .slice()
         .reverse()
         .map((h) => {
-          const label = h.action === 'borrow' ? '消耗' : '補充庫存';
-          return `<div class="history-item"><span>${label} ${h.qty} 件${h.person ? '（' + escapeHtml(h.person) + '）' : ''}</span><span>${formatTime(h.at)}</span></div>`;
+          const label = h.action === 'borrow' ? '消耗' : h.action === 'adjust' ? '管理員調整' : '補充庫存';
+          const qtyLabel = h.action === 'adjust' ? (h.qty > 0 ? `+${h.qty}` : h.qty) : h.qty;
+          return `<div class="history-item"><span>${label} ${qtyLabel} 件${h.person ? '（' + escapeHtml(h.person) + '）' : ''}</span><span>${formatTime(h.at)}</span></div>`;
         })
         .join('');
-      wrap.innerHTML = `<h4>異動紀錄</h4>${rows}`;
+      wrap.innerHTML = `<h4>異動紀錄</h4>${rows}${adminSection}`;
+      bindAdminHistoryEvents();
       return;
     }
 
@@ -557,16 +756,23 @@
           </div>`;
       })
       .join('');
-    wrap.innerHTML = `<h4>異動紀錄</h4>${rows}`;
+    wrap.innerHTML = `<h4>異動紀錄</h4>${rows}${adminSection}`;
+    bindAdminHistoryEvents();
   }
 
   function updateModalFieldsForAction() {
     const isStarred = activeItemRef && activeItemRef.isStarred;
     const personField = document.getElementById('borrowerField');
     const personLabel = personField.querySelector('label');
+    const qtyInput = document.getElementById('modalQty');
+    const qtyLabel = qtyInput.closest('.modal-field').querySelector('label');
 
     document.querySelectorAll('.seg-btn').forEach((btn) => {
       btn.classList.toggle('seg-active', btn.dataset.action === activeAction);
+      if (btn.dataset.action === 'adjust') {
+        btn.textContent = '🔧 調整庫存';
+        return;
+      }
       btn.textContent = isStarred
         ? btn.dataset.action === 'borrow'
           ? '➖ 消耗'
@@ -576,6 +782,15 @@
         : '📥 歸還';
     });
 
+    if (activeAction === 'adjust') {
+      qtyLabel.textContent = '新的庫存數量';
+      personLabel.textContent = '調整者';
+      const found = activeItemRef && findTestAndItem(activeItemRef.testId, activeItemRef.group, activeItemRef.code);
+      if (found) qtyInput.value = found.item.currentStock === null ? 0 : found.item.currentStock;
+      return;
+    }
+
+    qtyLabel.textContent = '數量';
     personLabel.textContent = isStarred
       ? activeAction === 'borrow'
         ? '使用/消耗者'
@@ -590,6 +805,8 @@
     if (!found) return;
     activeItemRef = { testId, group, code, isStarred: found.item.isStarred };
     activeAction = quickAction === 'return' ? 'return' : 'borrow';
+
+    document.getElementById('segAdjustBtn').classList.toggle('hidden', !isAdminMode);
 
     document.getElementById('modalTitle').textContent = found.test.name;
     document.getElementById('modalSubtitle').textContent = code.replace('*', '');
@@ -608,11 +825,66 @@
   function closeModal() {
     document.getElementById('modalOverlay').classList.add('hidden');
     activeItemRef = null;
+    editingHistoryAt = null;
+    confirmingDeleteAt = null;
   }
 
   function actionSuccessMessage(isStarred, action) {
     if (isStarred) return action === 'borrow' ? '已登記消耗' : '已登記補充庫存';
     return action === 'borrow' ? '已登記借出' : '已登記歸還';
+  }
+
+  // 管理員「調整庫存」：欄位裡填的是目標庫存數字本身（可以是 0），不是要加減的量，
+  // 所以跳過借出/歸還那些「不可小於等於0」「不可超過庫存」的檢查，另外算出 delta 記進異動紀錄。
+  async function submitAdjustStock(found, person) {
+    const { testId, group, code } = activeItemRef;
+    const newStockRaw = document.getElementById('modalQty').value;
+    const newStock = Number(newStockRaw);
+    if (newStockRaw === '' || Number.isNaN(newStock) || newStock < 0) {
+      showToast('請輸入正確的庫存數量（不能小於 0）');
+      return;
+    }
+
+    const submitBtn = document.getElementById('modalSubmit');
+    submitBtn.disabled = true;
+
+    if (isServerMode()) {
+      try {
+        const result = await apiPost({ testId, group, code, action: 'adjust', newStock, person });
+        if (!result.ok) {
+          showToast(result.error || '調整失敗');
+          submitBtn.disabled = false;
+          return;
+        }
+        showToast('已調整庫存');
+        closeModal();
+        reloadPageAfterSubmit();
+      } catch (err) {
+        showToast('連線失敗，請確認網路連線');
+        submitBtn.disabled = false;
+      }
+      return;
+    }
+
+    // ---------- 本機模式 ----------
+    const k = keyFor(testId, group, code);
+    const current = adjustments[k] || {
+      returnPurchaseQty: found.item.returnPurchaseQty,
+      borrowConsumeQty: found.item.borrowConsumeQty,
+      currentStock: found.item.currentStock,
+      borrower: found.item.borrower,
+      returner: found.item.returner,
+      history: [],
+    };
+    const delta = newStock - (current.currentStock ?? 0);
+    current.currentStock = newStock;
+    current.history.push({ action: 'adjust', qty: delta, person, at: Date.now() });
+    adjustments[k] = current;
+    saveAdjustments();
+
+    showToast('已調整庫存');
+    closeModal();
+    reloadPageAfterSubmit();
   }
 
   async function submitModal() {
@@ -621,14 +893,20 @@
     const found = findTestAndItem(testId, group, code);
     if (!found) return;
 
-    const qty = Number(document.getElementById('modalQty').value);
-    if (!qty || qty <= 0) {
-      showToast('請輸入大於 0 的數量');
-      return;
-    }
     const person = getPersonValue();
     if (!person) {
       showToast('請選擇或輸入人員姓名');
+      return;
+    }
+
+    if (activeAction === 'adjust') {
+      await submitAdjustStock(found, person);
+      return;
+    }
+
+    const qty = Number(document.getElementById('modalQty').value);
+    if (!qty || qty <= 0) {
+      showToast('請輸入大於 0 的數量');
       return;
     }
 
@@ -694,6 +972,76 @@
 
     showToast(actionSuccessMessage(isStarred, activeAction));
     closeModal();
+    reloadPageAfterSubmit();
+  }
+
+  // 管理員：儲存「原始異動紀錄」裡某一筆的編輯。
+  async function submitHistoryEdit(at) {
+    if (!activeItemRef) return;
+    const { testId, group, code } = activeItemRef;
+    const wrap = document.getElementById('modalHistory');
+    const row = wrap.querySelector(`.admin-history-editing[data-at="${at}"]`);
+    if (!row) return;
+
+    const newAction = row.querySelector('.admin-edit-action').value;
+    const newQty = Number(row.querySelector('.admin-edit-qty').value);
+    const newPerson = row.querySelector('.admin-edit-person').value.trim();
+
+    if (Number.isNaN(newQty)) {
+      showToast('數量格式錯誤');
+      return;
+    }
+    if ((newAction === 'borrow' || newAction === 'return') && newQty <= 0) {
+      showToast('借出/歸還的數量必須大於 0');
+      return;
+    }
+    if (!newPerson) {
+      showToast('請輸入人員姓名');
+      return;
+    }
+
+    if (isServerMode()) {
+      try {
+        const result = await apiPost({ testId, group, code, action: 'editHistory', at, newAction, newQty, newPerson });
+        if (!result.ok) {
+          showToast(result.error || '更新失敗');
+          return;
+        }
+        showToast('已更新異動紀錄');
+        reloadPageAfterSubmit();
+      } catch (err) {
+        showToast('連線失敗，請確認網路連線');
+      }
+      return;
+    }
+
+    editHistoryEntryLocal(testId, group, code, at, newAction, newQty, newPerson);
+    showToast('已更新異動紀錄');
+    reloadPageAfterSubmit();
+  }
+
+  // 管理員：確認刪除「原始異動紀錄」裡的某一筆。
+  async function submitHistoryDelete(at) {
+    if (!activeItemRef) return;
+    const { testId, group, code } = activeItemRef;
+
+    if (isServerMode()) {
+      try {
+        const result = await apiPost({ testId, group, code, action: 'editHistory', at, delete: true });
+        if (!result.ok) {
+          showToast(result.error || '刪除失敗');
+          return;
+        }
+        showToast('已刪除異動紀錄');
+        reloadPageAfterSubmit();
+      } catch (err) {
+        showToast('連線失敗，請確認網路連線');
+      }
+      return;
+    }
+
+    deleteHistoryEntryLocal(testId, group, code, at);
+    showToast('已刪除異動紀錄');
     reloadPageAfterSubmit();
   }
 
@@ -957,6 +1305,8 @@
         baseData = parsed;
         adjustments = {}; // 換了資料來源，本機異動歸零，避免對錯資料
         saveAdjustments();
+        customTests = {}; // 舊清冊裡管理員新增的測驗／項目編號可能對不上新清冊，一併歸零
+        saveCustomTests();
         renderBorrowerList();
         render();
         showToast(`匯入成功，共 ${parsed.tests.length} 項測驗`);
@@ -966,6 +1316,147 @@
       }
     };
     reader.readAsArrayBuffer(file);
+  }
+
+  // ---------- 管理員：新增測驗/項目 Modal ----------
+  const GROUP_OTHER_OPTION = '__other_group__';
+
+  function renderAddGroupOptions() {
+    const select = document.getElementById('addGroupSelect');
+    const groups = Array.from(new Set(baseData.tests.map((t) => t.group)));
+    const options = groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`);
+    options.push(`<option value="${GROUP_OTHER_OPTION}">其他（自行輸入）...</option>`);
+    select.innerHTML = options.join('');
+  }
+
+  function getAddGroupValue() {
+    const select = document.getElementById('addGroupSelect');
+    if (select.value === GROUP_OTHER_OPTION) {
+      return document.getElementById('addGroupOther').value.trim();
+    }
+    return select.value;
+  }
+
+  // 測驗編號＋分頁如果對到既有測驗，測驗名稱欄位自動帶入並鎖住，避免同一個測驗被打成兩個不同名字。
+  // 用 addTestNameAutoFilled 記住目前欄位裡的值是不是我們自動填的：使用者一邊打編號、一邊還沒打完
+  // 分頁的時候，中間可能會短暫對到別的測驗（例如打「31」的過程中先打了「3」對到 #3），
+  // 對到又對不到時，只清掉「我們自動填的」內容，不要動到使用者自己手動打的測驗名稱。
+  let addTestNameAutoFilled = false;
+
+  function syncAddItemTestName() {
+    const testId = Number(document.getElementById('addTestId').value);
+    const group = getAddGroupValue();
+    const nameInput = document.getElementById('addTestName');
+    const existing = testId && group ? baseData.tests.find((t) => t.id === testId && t.group === group) : null;
+    if (existing) {
+      nameInput.value = existing.name;
+      nameInput.readOnly = true;
+      addTestNameAutoFilled = true;
+    } else {
+      nameInput.readOnly = false;
+      if (addTestNameAutoFilled) {
+        nameInput.value = '';
+        addTestNameAutoFilled = false;
+      }
+    }
+  }
+
+  function openAddItemModal() {
+    renderAddGroupOptions();
+    document.getElementById('addTestId').value = '';
+    document.getElementById('addTestName').value = '';
+    document.getElementById('addTestName').readOnly = false;
+    addTestNameAutoFilled = false;
+    document.getElementById('addItemCode').value = '';
+    document.getElementById('addItemStarred').checked = false;
+    document.getElementById('addItemStock').value = '';
+    document.getElementById('addGroupOther').style.display = 'none';
+    document.getElementById('addGroupOther').value = '';
+    document.getElementById('addItemModalOverlay').classList.remove('hidden');
+  }
+
+  function closeAddItemModal() {
+    document.getElementById('addItemModalOverlay').classList.add('hidden');
+  }
+
+  async function submitAddItem() {
+    const testIdRaw = document.getElementById('addTestId').value.trim();
+    const testId = Number(testIdRaw);
+    const group = getAddGroupValue();
+    const codeRaw = document.getElementById('addItemCode').value.trim();
+    const isStarred = document.getElementById('addItemStarred').checked;
+    const stockRaw = document.getElementById('addItemStock').value.trim();
+
+    if (!testIdRaw || !Number.isInteger(testId) || testId <= 0) {
+      showToast('請輸入正確的測驗編號（正整數）');
+      return;
+    }
+    if (!group) {
+      showToast('請選擇或輸入分頁');
+      return;
+    }
+    if (!codeRaw) {
+      showToast('請輸入項目代碼');
+      return;
+    }
+    const currentStock = stockRaw === '' ? null : Number(stockRaw);
+    if (stockRaw !== '' && (Number.isNaN(currentStock) || currentStock < 0)) {
+      showToast('庫存數量格式錯誤');
+      return;
+    }
+
+    const existingTest = baseData.tests.find((t) => t.id === testId && t.group === group);
+    const testName = existingTest ? existingTest.name : document.getElementById('addTestName').value.trim();
+    if (!testName) {
+      showToast('請輸入測驗名稱');
+      return;
+    }
+
+    const code = isStarred ? (codeRaw.endsWith('*') ? codeRaw : codeRaw + '*') : codeRaw.replace(/\*+$/, '');
+    if (existingTest && existingTest.items.some((it) => it.code === code)) {
+      showToast('這個測驗底下已經有相同的項目代碼了');
+      return;
+    }
+
+    const submitBtn = document.getElementById('addItemSubmit');
+    submitBtn.disabled = true;
+
+    if (isServerMode()) {
+      try {
+        const result = await apiPost({ action: 'addItem', testId, group, testName, code, isStarred, currentStock });
+        if (!result.ok) {
+          showToast(result.error || '新增失敗');
+          submitBtn.disabled = false;
+          return;
+        }
+        showToast('已新增');
+        closeAddItemModal();
+        reloadPageAfterSubmit();
+      } catch (err) {
+        showToast('連線失敗，請確認網路連線');
+        submitBtn.disabled = false;
+      }
+      return;
+    }
+
+    // ---------- 本機模式 ----------
+    const key = testId + '::' + group;
+    const newItem = {
+      code,
+      isStarred,
+      returnPurchaseQty: 0,
+      borrowConsumeQty: 0,
+      currentStock,
+      borrower: '',
+      returner: '',
+    };
+    if (!customTests[key]) customTests[key] = { id: testId, group, name: testName, items: [] };
+    customTests[key].items.push(newItem);
+    saveCustomTests();
+
+    showToast('已新增');
+    closeAddItemModal();
+    reloadPageAfterSubmit();
   }
 
   // ---------- 連線設定 Modal ----------
@@ -1119,6 +1610,26 @@
     document.getElementById('pinPromptSkip').addEventListener('click', () => {
       sessionStorage.setItem(PIN_PROMPT_SKIP_KEY, '1');
       closePinPrompt();
+    });
+
+    document.getElementById('addItemBtn').addEventListener('click', openAddItemModal);
+    document.getElementById('addItemModalClose').addEventListener('click', closeAddItemModal);
+    document.getElementById('addItemModalOverlay').addEventListener('click', (e) => {
+      if (e.target.id === 'addItemModalOverlay') closeAddItemModal();
+    });
+    document.getElementById('addItemSubmit').addEventListener('click', submitAddItem);
+    document.getElementById('addTestId').addEventListener('input', syncAddItemTestName);
+    document.getElementById('addGroupOther').addEventListener('input', syncAddItemTestName);
+    document.getElementById('addGroupSelect').addEventListener('change', (e) => {
+      const otherInput = document.getElementById('addGroupOther');
+      if (e.target.value === GROUP_OTHER_OPTION) {
+        otherInput.style.display = 'block';
+        otherInput.focus();
+      } else {
+        otherInput.style.display = 'none';
+        otherInput.value = '';
+      }
+      syncAddItemTestName();
     });
   }
 

@@ -28,6 +28,7 @@
         <button class="btn btn-ghost" id="exportOutstandingBtn">📋 匯出未歸還清單</button>
         <button class="btn btn-ghost hidden" id="refreshBtn">🔄 重新整理</button>
         <button class="btn btn-ghost hidden" id="connectNowBtn">🔒 輸入密碼連線</button>
+        <button class="btn btn-ghost hidden" id="addItemBtn">➕ 新增測驗/項目</button>
         <button class="btn btn-ghost hidden" id="connectionBtn">⚙️ 連線設定</button>
       </div>
     </div>
@@ -113,6 +114,7 @@
         <div class="segmented">
           <button class="seg-btn seg-active" data-action="borrow">📤 借出 / 消耗</button>
           <button class="seg-btn" data-action="return">📥 歸還 / 購買</button>
+          <button class="seg-btn hidden" data-action="adjust" id="segAdjustBtn">🔧 調整庫存</button>
         </div>
       </div>
 
@@ -135,6 +137,50 @@
       <button class="btn btn-primary modal-submit" id="modalSubmit">確認送出</button>
 
       <div class="modal-history" id="modalHistory"></div>
+    </div>
+  </div>
+
+  <!-- 管理員：新增測驗/項目 Modal -->
+  <div id="addItemModalOverlay" class="modal-overlay hidden">
+    <div class="modal card">
+      <button class="modal-close" id="addItemModalClose">✕</button>
+      <h3>➕ 新增測驗/項目</h3>
+      <p class="modal-subtitle">測驗編號＋分頁如果對到已經存在的測驗，會把這個項目加進該測驗底下；對不到的話會建立一筆全新的測驗。</p>
+
+      <div class="modal-field">
+        <label for="addTestId">測驗編號</label>
+        <input type="number" id="addTestId" min="1" placeholder="例如 31" />
+      </div>
+
+      <div class="modal-field">
+        <label for="addGroupSelect">分頁</label>
+        <select id="addGroupSelect"></select>
+        <input type="text" id="addGroupOther" placeholder="請輸入分頁名稱，例如 31-40" style="display:none; margin-top:0.5rem;" />
+      </div>
+
+      <div class="modal-field">
+        <label for="addTestName">測驗名稱</label>
+        <input type="text" id="addTestName" placeholder="請輸入測驗名稱" />
+      </div>
+
+      <div class="modal-field">
+        <label for="addItemCode">項目代碼</label>
+        <input type="text" id="addItemCode" placeholder="例如 31-1題本" />
+      </div>
+
+      <div class="modal-field">
+        <label class="checkbox-label">
+          <input type="checkbox" id="addItemStarred" />
+          消耗品（借用數量需累計加總，代碼結尾會自動加上 *）
+        </label>
+      </div>
+
+      <div class="modal-field">
+        <label for="addItemStock">初始庫存（可留空＝無資料）</label>
+        <input type="number" id="addItemStock" min="0" placeholder="可留空" />
+      </div>
+
+      <button class="btn btn-primary modal-submit" id="addItemSubmit">確認新增</button>
     </div>
   </div>
 

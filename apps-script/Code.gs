@@ -99,7 +99,12 @@ function doGet(e) {
   }
 }
 
-// POST {WEB_APP_URL}  body(text/plain, JSON字串): { pin, testId, group, code, action:'borrow'|'return', qty, person }
+// POST {WEB_APP_URL}  body(text/plain, JSON字串)。共用 { pin, action }，其餘欄位依 action 而定：
+//   borrow/return: { testId, group, code, qty, person }
+//   adjust（管理員直接設定庫存）: { testId, group, code, newStock, person }
+//   addItem（管理員新增測驗/項目）: { testId, group, testName, code, isStarred, currentStock }
+//   editHistory（管理員編輯/刪除單筆異動紀錄）: { testId, group, code, at, newAction, newQty, newPerson }
+//                                              或 { testId, group, code, at, delete: true }
 // 前端刻意用 text/plain 送出 JSON，避開瀏覽器對 application/json 的 CORS 預檢請求（Apps Script 不支援 OPTIONS）。
 function doPost(e) {
   var payload;
@@ -112,6 +117,55 @@ function doPost(e) {
   var pin = String(payload.pin || '').trim();
   if (!checkPin_(pin)) return jsonOutput_({ ok: false, error: 'PIN 錯誤' });
 
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (err) {
+    return jsonOutput_({ ok: false, error: '系統忙碌中，請稍後再試一次' });
+  }
+
+  try {
+    var action = payload.action;
+    if (action === 'borrow' || action === 'return') return handleBorrowReturn_(payload);
+    if (action === 'adjust') return handleAdjust_(payload);
+    if (action === 'addItem') return handleAddItem_(payload);
+    if (action === 'editHistory') return handleEditHistory_(payload);
+    return jsonOutput_({ ok: false, error: '參數錯誤' });
+  } catch (err) {
+    return jsonOutput_({ ok: false, error: '伺服器錯誤：' + err.message });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 在 Items 表裡找 testId+group+itemCode 對應的列，找不到回傳 -1。
+function findItemRow_(data, testId, group, code) {
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(testId) && data[i][2] === group && data[i][3] === code) return i;
+  }
+  return -1;
+}
+
+// 不用 appendRow：它會忽略欄位已設定的文字格式，把 "1-10" 這種值自動誤判成日期。
+// 改成先鎖定新那一列的 group/itemCode 欄位為文字格式，再用 setValues 寫入，才能保留原始文字。
+function appendHistoryRow_(ss, testId, group, code, action, qty, person) {
+  var historySheet = ss.getSheetByName(SHEET_HISTORY);
+  var newHistoryRow = historySheet.getLastRow() + 1;
+  historySheet.getRange(newHistoryRow, 3, 1, 2).setNumberFormat('@');
+  historySheet.getRange(newHistoryRow, 1, 1, 7).setValues([[new Date(), testId, group, code, action, qty, person]]);
+}
+
+// 單一異動紀錄對「目前庫存」造成的影響：+ 表示庫存增加、- 表示減少。
+// borrow/return 的 qty 一定是正數，adjust 的 qty 本身已經是有正負號的異動量。
+// 跟 app.js 裡的 historyEntryDelta() 是同一套邏輯，editHistory 編輯/刪除紀錄時要用同樣的算法。
+function historyEntryDelta_(entry) {
+  if (entry.action === 'borrow') return -entry.qty;
+  if (entry.action === 'return') return entry.qty;
+  if (entry.action === 'adjust') return entry.qty;
+  return 0;
+}
+
+function handleBorrowReturn_(payload) {
   var testId = payload.testId;
   var group = payload.group;
   var code = payload.code;
@@ -123,68 +177,170 @@ function doPost(e) {
     return jsonOutput_({ ok: false, error: '參數錯誤' });
   }
 
-  var lock = LockService.getScriptLock();
-  try {
-    lock.waitLock(10000);
-  } catch (err) {
-    return jsonOutput_({ ok: false, error: '系統忙碌中，請稍後再試一次' });
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var data = itemsSheet.getDataRange().getValues();
+
+  var rowIndex = findItemRow_(data, testId, group, code);
+  if (rowIndex === -1) return jsonOutput_({ ok: false, error: '找不到此品項' });
+
+  var row = data[rowIndex];
+  var isStarred = row[4] === true || String(row[4]).toUpperCase() === 'TRUE';
+  var currentStock = row[5] === '' ? null : Number(row[5]);
+  var borrower = row[6] || '';
+  var returner = row[7] || '';
+
+  if (!isStarred && action === 'borrow' && !person) {
+    return jsonOutput_({ ok: false, error: '借還品需要輸入借用者姓名' });
+  }
+  if (action === 'borrow' && currentStock !== null && qty > currentStock) {
+    return jsonOutput_({ ok: false, error: '數量超過目前庫存（剩 ' + currentStock + ' 件）' });
   }
 
-  try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
-    var data = itemsSheet.getDataRange().getValues();
-
-    var rowIndex = -1;
-    for (var i = 1; i < data.length; i++) {
-      if (String(data[i][0]) === String(testId) && data[i][2] === group && data[i][3] === code) {
-        rowIndex = i;
-        break;
-      }
-    }
-    if (rowIndex === -1) return jsonOutput_({ ok: false, error: '找不到此品項' });
-
-    var row = data[rowIndex];
-    var isStarred = row[4] === true || String(row[4]).toUpperCase() === 'TRUE';
-    var currentStock = row[5] === '' ? null : Number(row[5]);
-    var borrower = row[6] || '';
-    var returner = row[7] || '';
-
-    if (!isStarred && action === 'borrow' && !person) {
-      return jsonOutput_({ ok: false, error: '借還品需要輸入借用者姓名' });
-    }
-    if (action === 'borrow' && currentStock !== null && qty > currentStock) {
-      return jsonOutput_({ ok: false, error: '數量超過目前庫存（剩 ' + currentStock + ' 件）' });
-    }
-
-    if (action === 'borrow') {
-      if (currentStock !== null) currentStock -= qty;
-      if (person) borrower = person;
-    } else {
-      if (currentStock !== null) currentStock += qty;
-      if (person) returner = person;
-      if (!isStarred) borrower = ''; // 借還品已歸還，清空目前借用中的狀態
-    }
-
-    var sheetRow = rowIndex + 1; // data[0] 是標題列，sheet 實際列號 = 陣列索引 + 1
-    itemsSheet.getRange(sheetRow, 6, 1, 3).setValues([[currentStock === null ? '' : currentStock, borrower, returner]]);
-
-    // 不用 appendRow：它會忽略欄位已設定的文字格式，把 "1-10" 這種值自動誤判成日期。
-    // 改成先鎖定新那一列的 group/itemCode 欄位為文字格式，再用 setValues 寫入，才能保留原始文字。
-    var historySheet = ss.getSheetByName(SHEET_HISTORY);
-    var newHistoryRow = historySheet.getLastRow() + 1;
-    historySheet.getRange(newHistoryRow, 3, 1, 2).setNumberFormat('@');
-    historySheet.getRange(newHistoryRow, 1, 1, 7).setValues([[new Date(), testId, group, code, action, qty, person]]);
-
-    return jsonOutput_({
-      ok: true,
-      item: { code: code, isStarred: isStarred, currentStock: currentStock, borrower: borrower, returner: returner },
-    });
-  } catch (err) {
-    return jsonOutput_({ ok: false, error: '伺服器錯誤：' + err.message });
-  } finally {
-    lock.releaseLock();
+  if (action === 'borrow') {
+    if (currentStock !== null) currentStock -= qty;
+    if (person) borrower = person;
+  } else {
+    if (currentStock !== null) currentStock += qty;
+    if (person) returner = person;
+    if (!isStarred) borrower = ''; // 借還品已歸還，清空目前借用中的狀態
   }
+
+  var sheetRow = rowIndex + 1; // data[0] 是標題列，sheet 實際列號 = 陣列索引 + 1
+  itemsSheet.getRange(sheetRow, 6, 1, 3).setValues([[currentStock === null ? '' : currentStock, borrower, returner]]);
+  appendHistoryRow_(ss, testId, group, code, action, qty, person);
+
+  return jsonOutput_({
+    ok: true,
+    item: { code: code, isStarred: isStarred, currentStock: currentStock, borrower: borrower, returner: returner },
+  });
+}
+
+// 管理員：直接把庫存設定成一個目標數字（不是加減量），算出 delta 記一筆 action:'adjust' 的異動紀錄。
+function handleAdjust_(payload) {
+  var testId = payload.testId;
+  var group = payload.group;
+  var code = payload.code;
+  var newStock = Number(payload.newStock);
+  var person = String(payload.person || '').trim();
+
+  if (!testId || !group || !code || isNaN(newStock) || newStock < 0 || !person) {
+    return jsonOutput_({ ok: false, error: '參數錯誤' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var data = itemsSheet.getDataRange().getValues();
+
+  var rowIndex = findItemRow_(data, testId, group, code);
+  if (rowIndex === -1) return jsonOutput_({ ok: false, error: '找不到此品項' });
+
+  var row = data[rowIndex];
+  var isStarred = row[4] === true || String(row[4]).toUpperCase() === 'TRUE';
+  var currentStock = row[5] === '' ? null : Number(row[5]);
+  var borrower = row[6] || '';
+  var returner = row[7] || '';
+  var delta = newStock - (currentStock === null ? 0 : currentStock);
+
+  var sheetRow = rowIndex + 1;
+  itemsSheet.getRange(sheetRow, 6, 1, 1).setValue(newStock);
+  appendHistoryRow_(ss, testId, group, code, 'adjust', delta, person);
+
+  return jsonOutput_({
+    ok: true,
+    item: { code: code, isStarred: isStarred, currentStock: newStock, borrower: borrower, returner: returner },
+  });
+}
+
+// 管理員：新增一筆全新測驗，或幫既有測驗（testId+group 已存在）新增一個項目——用同一支處理，
+// 呼叫端只要看 testId+group 有沒有對到既有測驗，就知道這次是「新增測驗」還是「加項目」。
+function handleAddItem_(payload) {
+  var testId = payload.testId;
+  var group = String(payload.group || '').trim();
+  var testName = String(payload.testName || '').trim();
+  var code = String(payload.code || '').trim();
+  var isStarred = !!payload.isStarred;
+  var currentStock =
+    payload.currentStock === null || payload.currentStock === '' || payload.currentStock === undefined
+      ? ''
+      : Number(payload.currentStock);
+
+  if (!testId || !group || !testName || !code) {
+    return jsonOutput_({ ok: false, error: '參數錯誤' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var data = itemsSheet.getDataRange().getValues();
+
+  if (findItemRow_(data, testId, group, code) !== -1) {
+    return jsonOutput_({ ok: false, error: '這個測驗底下已經有相同的項目代碼了' });
+  }
+
+  // 一樣要避開 appendRow 的日期誤判問題，先鎖定新那一列的 group/itemCode 欄位為文字格式。
+  var newRow = itemsSheet.getLastRow() + 1;
+  itemsSheet.getRange(newRow, 3, 1, 2).setNumberFormat('@');
+  itemsSheet.getRange(newRow, 1, 1, 8).setValues([[testId, testName, group, code, isStarred, currentStock, '', '']]);
+
+  return jsonOutput_({ ok: true });
+}
+
+// 管理員：編輯或刪除 History 表裡單一一筆紀錄，並把該筆對庫存造成的影響同步反映回 Items 表。
+// 用 testId+group+code+at（毫秒時間戳記）辨識是哪一列，跟 app.js 前端用同一套 key。
+function handleEditHistory_(payload) {
+  var testId = payload.testId;
+  var group = payload.group;
+  var code = payload.code;
+  var at = Number(payload.at);
+
+  if (!testId || !group || !code || isNaN(at)) {
+    return jsonOutput_({ ok: false, error: '參數錯誤' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var historySheet = ss.getSheetByName(SHEET_HISTORY);
+  var historyData = historySheet.getDataRange().getValues();
+
+  var historyRowIndex = -1;
+  for (var h = 1; h < historyData.length; h++) {
+    var hAtRaw = historyData[h][0];
+    var hAt = hAtRaw instanceof Date ? hAtRaw.getTime() : new Date(hAtRaw).getTime();
+    if (hAt === at && String(historyData[h][1]) === String(testId) && historyData[h][2] === group && historyData[h][3] === code) {
+      historyRowIndex = h;
+      break;
+    }
+  }
+  if (historyRowIndex === -1) return jsonOutput_({ ok: false, error: '找不到這筆異動紀錄' });
+
+  var oldDelta = historyEntryDelta_({ action: historyData[historyRowIndex][4], qty: Number(historyData[historyRowIndex][5]) });
+
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var itemsData = itemsSheet.getDataRange().getValues();
+  var itemRowIndex = findItemRow_(itemsData, testId, group, code);
+  if (itemRowIndex === -1) return jsonOutput_({ ok: false, error: '找不到此品項' });
+
+  var currentStock = itemsData[itemRowIndex][5] === '' ? null : Number(itemsData[itemRowIndex][5]);
+  if (currentStock !== null) currentStock -= oldDelta;
+
+  var sheetHistoryRow = historyRowIndex + 1; // historyData[0] 是標題列
+
+  if (payload['delete'] === true) {
+    historySheet.deleteRow(sheetHistoryRow);
+  } else {
+    var newAction = payload.newAction;
+    var newQty = Number(payload.newQty);
+    var newPerson = String(payload.newPerson || '').trim();
+    if ((newAction !== 'borrow' && newAction !== 'return' && newAction !== 'adjust') || isNaN(newQty)) {
+      return jsonOutput_({ ok: false, error: '參數錯誤' });
+    }
+    if (currentStock !== null) currentStock += historyEntryDelta_({ action: newAction, qty: newQty });
+    historySheet.getRange(sheetHistoryRow, 5, 1, 3).setValues([[newAction, newQty, newPerson]]);
+  }
+
+  var itemSheetRow = itemRowIndex + 1; // itemsData[0] 是標題列
+  itemsSheet.getRange(itemSheetRow, 6, 1, 1).setValue(currentStock === null ? '' : currentStock);
+
+  return jsonOutput_({ ok: true });
 }
 
 // ---------- 一次性設定：只需要在 Apps Script 編輯器裡執行這兩個函式各一次 ----------
