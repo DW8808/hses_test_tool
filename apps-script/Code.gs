@@ -169,8 +169,12 @@ function doPost(e) {
     var sheetRow = rowIndex + 1; // data[0] 是標題列，sheet 實際列號 = 陣列索引 + 1
     itemsSheet.getRange(sheetRow, 6, 1, 3).setValues([[currentStock === null ? '' : currentStock, borrower, returner]]);
 
+    // 不用 appendRow：它會忽略欄位已設定的文字格式，把 "1-10" 這種值自動誤判成日期。
+    // 改成先鎖定新那一列的 group/itemCode 欄位為文字格式，再用 setValues 寫入，才能保留原始文字。
     var historySheet = ss.getSheetByName(SHEET_HISTORY);
-    historySheet.appendRow([new Date(), testId, group, code, action, qty, person]);
+    var newHistoryRow = historySheet.getLastRow() + 1;
+    historySheet.getRange(newHistoryRow, 3, 1, 2).setNumberFormat('@');
+    historySheet.getRange(newHistoryRow, 1, 1, 7).setValues([[new Date(), testId, group, code, action, qty, person]]);
 
     return jsonOutput_({
       ok: true,
@@ -225,6 +229,45 @@ function setPin() {
   var pin = '請改成一組只有你自己知道的密碼';
   PropertiesService.getScriptProperties().setProperty('PIN', pin);
   Logger.log('PIN 已設定完成。');
+}
+
+// 一次性修復：舊版程式用 appendRow 寫入 History，把 group 欄位（例如 "1-10"）誤存成日期。
+// 這個函式會比對 Items 表格（group 沒壞掉），把 History 每一列的 group 修正回正確文字，
+// 並把該欄位設回文字格式，避免下次又被誤判。執行一次即可，之後 doPost 已經改用不會出錯的寫法。
+function repairHistoryGroupColumn() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var itemsSheet = ss.getSheetByName(SHEET_ITEMS);
+  var historySheet = ss.getSheetByName(SHEET_HISTORY);
+
+  var itemsData = itemsSheet.getDataRange().getValues();
+  var groupByTestIdAndCode = {};
+  for (var i = 1; i < itemsData.length; i++) {
+    var testId = itemsData[i][0];
+    var group = itemsData[i][2];
+    var itemCode = itemsData[i][3];
+    if (testId === '' || itemCode === '') continue;
+    groupByTestIdAndCode[testId + '::' + itemCode] = group;
+  }
+
+  var historyData = historySheet.getDataRange().getValues();
+  var fixedCount = 0;
+  for (var h = 1; h < historyData.length; h++) {
+    var hTestId = historyData[h][1];
+    var hGroup = historyData[h][2];
+    var hItemCode = historyData[h][3];
+    if (hTestId === '' || hItemCode === '') continue;
+    var correctGroup = groupByTestIdAndCode[hTestId + '::' + hItemCode];
+    if (correctGroup === undefined) continue;
+    if (hGroup === correctGroup) continue; // 本來就是對的，不用改
+
+    var sheetRow = h + 1;
+    historySheet.getRange(sheetRow, 3, 1, 1).setNumberFormat('@');
+    historySheet.getRange(sheetRow, 3, 1, 1).setValue(correctGroup);
+    fixedCount++;
+  }
+
+  SpreadsheetApp.flush();
+  Logger.log('修復完成！共修正 ' + fixedCount + ' 筆 History 紀錄的 group 欄位。');
 }
 
 // ---------- 種子資料（自動產生，請勿手動修改；來源請見 scripts/generate_seed.js） ----------
