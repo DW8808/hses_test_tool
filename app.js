@@ -14,6 +14,9 @@
   // 雲端模式：伺服器回傳的歷史紀錄： { "測驗id::項目code": [ {action, qty, person, at}, ... ] }
   let historyMap = {};
 
+  // 是否顯示「連線設定」按鈕：只有網址帶 ?admin=1 時才顯示，避免老師不小心誤按到連線設定或取消連線。
+  let isAdminMode = false;
+
   // 雲端連線設定： { url, pin } 或 null（= 本機模式）
   let connection = loadConnection();
 
@@ -36,12 +39,16 @@
   // ---------- 雲端連線設定持久化 ----------
   // 支援用網址參數一鍵連線，例如：index.html?gasUrl=...&pin=1234
   // 這樣管理者只要把這個連結傳給其他老師，對方點開網頁就自動設定好連線，不用自己貼網址跟 PIN。
+  // 管理者自己要開啟「連線設定」按鈕時，網址後面加 &admin=1。
   function applyConnectionFromUrlIfPresent() {
     const params = new URLSearchParams(window.location.search);
     const gasUrl = params.get('gasUrl');
     const pin = params.get('pin');
+    isAdminMode = params.get('admin') === '1';
     if (gasUrl && pin) {
       localStorage.setItem(CONNECTION_KEY, JSON.stringify({ url: gasUrl, pin }));
+    }
+    if (params.toString()) {
       // 清掉網址列上的參數，避免 PIN 一直顯示在網址列/瀏覽紀錄裡
       const url = new URL(window.location.href);
       url.search = '';
@@ -365,6 +372,8 @@
     const serverMode = isServerMode();
     document.getElementById('refreshBtn').classList.toggle('hidden', !serverMode);
     document.getElementById('importFileLabel').classList.toggle('hidden', serverMode);
+    // 連線設定按鈕只在網址帶 ?admin=1 時顯示，避免一般使用者誤按到取消連線。
+    document.getElementById('connectionBtn').classList.toggle('hidden', !isAdminMode);
   }
 
   function render() {
