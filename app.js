@@ -17,6 +17,11 @@
   // 是否顯示「連線設定」按鈕：只有網址帶 ?admin=1 時才顯示，避免老師不小心誤按到連線設定或取消連線。
   let isAdminMode = false;
 
+  // 網址只帶 ?gasUrl=... （沒有 pin）時，代表這是要給老師的連結：先記住網址，
+  // 但還沒有連線，會在畫面上跳出「請輸入通關密碼」的提示，PIN 由管理者另外口頭告知，
+  // 這樣即使連結被轉發出去，對方沒有 PIN 還是連不進去。
+  let pendingGasUrl = null;
+
   // 雲端連線設定： { url, pin } 或 null（= 本機模式）
   let connection = loadConnection();
 
@@ -37,8 +42,9 @@
   }
 
   // ---------- 雲端連線設定持久化 ----------
-  // 支援用網址參數一鍵連線，例如：index.html?gasUrl=...&pin=1234
-  // 這樣管理者只要把這個連結傳給其他老師，對方點開網頁就自動設定好連線，不用自己貼網址跟 PIN。
+  // 支援兩種網址參數用法：
+  // 1. ?gasUrl=...&pin=...  一鍵連線（給管理者自己用，PIN 會留在網址列裡，方便但較不安全）
+  // 2. ?gasUrl=...          只記住網址，PIN 另外口頭告知，畫面會跳出輸入框（建議給其他老師用）
   // 管理者自己要開啟「連線設定」按鈕時，網址後面加 &admin=1。
   function applyConnectionFromUrlIfPresent() {
     const params = new URLSearchParams(window.location.search);
@@ -47,12 +53,25 @@
     isAdminMode = params.get('admin') === '1';
     if (gasUrl && pin) {
       localStorage.setItem(CONNECTION_KEY, JSON.stringify({ url: gasUrl, pin }));
+    } else if (gasUrl && !isServerModeFromStorage()) {
+      pendingGasUrl = gasUrl;
     }
     if (params.toString()) {
       // 清掉網址列上的參數，避免 PIN 一直顯示在網址列/瀏覽紀錄裡
       const url = new URL(window.location.href);
       url.search = '';
       window.history.replaceState({}, '', url.toString());
+    }
+  }
+
+  function isServerModeFromStorage() {
+    try {
+      const raw = localStorage.getItem(CONNECTION_KEY);
+      if (!raw) return false;
+      const conn = JSON.parse(raw);
+      return !!(conn && conn.url && conn.pin);
+    } catch (e) {
+      return false;
     }
   }
 
@@ -131,13 +150,14 @@
   }
 
   // ---------- 資料載入 ----------
+  // 回傳 true/false 代表這次載入成功與否，讓呼叫端（例如首次輸入 PIN 的畫面）可以判斷要不要繼續往下走。
   async function loadData() {
     if (isServerMode()) {
       try {
         const result = await apiGet();
         if (!result.ok) {
           showToast('連線失敗：' + (result.error || '未知錯誤'));
-          return;
+          return false;
         }
         baseData = {
           generatedAt: result.generatedAt,
@@ -148,7 +168,7 @@
         historyMap = result.history || {};
       } catch (err) {
         showToast('連線失敗，請確認網址與網路連線');
-        return;
+        return false;
       }
     } else {
       baseData = window.TEST_TOOL_DATA || { generatedAt: '', sourceFile: '', borrowers: [], tests: [] };
@@ -156,6 +176,7 @@
     }
     renderBorrowerList();
     render();
+    return true;
   }
 
   // ---------- 計算與彙整 ----------
@@ -833,6 +854,38 @@
     await loadData();
   }
 
+  // ---------- 首次啟用 PIN 輸入（給只帶 ?gasUrl= 網址的老師連結用） ----------
+  function openPinPrompt() {
+    document.getElementById('pinPromptInput').value = '';
+    document.getElementById('pinPromptError').textContent = '';
+    document.getElementById('pinPromptOverlay').classList.remove('hidden');
+    document.getElementById('pinPromptInput').focus();
+  }
+
+  function closePinPrompt() {
+    document.getElementById('pinPromptOverlay').classList.add('hidden');
+  }
+
+  async function submitPinPrompt() {
+    const pin = document.getElementById('pinPromptInput').value.trim();
+    if (!pin) {
+      document.getElementById('pinPromptError').textContent = '請輸入 PIN';
+      return;
+    }
+    const submitBtn = document.getElementById('pinPromptSubmit');
+    submitBtn.disabled = true;
+    saveConnection({ url: pendingGasUrl, pin });
+    const ok = await loadData();
+    submitBtn.disabled = false;
+    if (ok) {
+      pendingGasUrl = null;
+      closePinPrompt();
+    } else {
+      saveConnection(null); // PIN 錯誤，不要留著壞掉的連線設定
+      document.getElementById('pinPromptError').textContent = 'PIN 不正確，請確認後再試一次';
+    }
+  }
+
   // ---------- 事件綁定 ----------
   function bindEvents() {
     document.getElementById('searchInput').addEventListener('input', (e) => {
@@ -909,12 +962,22 @@
     });
     document.getElementById('connectionSaveBtn').addEventListener('click', saveConnectionFromModal);
     document.getElementById('connectionDisconnectBtn').addEventListener('click', disconnectFromModal);
+
+    document.getElementById('pinPromptSubmit').addEventListener('click', submitPinPrompt);
+    document.getElementById('pinPromptInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitPinPrompt();
+    });
+    document.getElementById('pinPromptSkip').addEventListener('click', () => {
+      pendingGasUrl = null;
+      closePinPrompt();
+    });
   }
 
   // ---------- 初始化 ----------
   async function init() {
     bindEvents();
     await loadData();
+    if (pendingGasUrl) openPinPrompt();
   }
 
   document.addEventListener('DOMContentLoaded', init);

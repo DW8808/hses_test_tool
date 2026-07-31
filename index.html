@@ -157,6 +157,23 @@
     </div>
   </div>
 
+  <!-- 首次啟用：只需要輸入 PIN（給拿到連結的老師用，不能改網址、不能取消連線） -->
+  <div id="pinPromptOverlay" class="modal-overlay hidden">
+    <div class="modal card">
+      <h3>🔒 請輸入通關密碼</h3>
+      <p class="modal-subtitle">請輸入管理者提供給你的 PIN，才能連上共用的庫存資料。輸入一次後這台裝置以後就不用再輸入。</p>
+
+      <div class="modal-field">
+        <label for="pinPromptInput">PIN</label>
+        <input type="text" id="pinPromptInput" placeholder="通關密碼" autocomplete="off" />
+      </div>
+
+      <button class="btn btn-primary modal-submit" id="pinPromptSubmit">確認</button>
+      <button class="btn btn-ghost" id="pinPromptSkip" style="width:100%; margin-top:0.6rem;">稍後再說（先看離線資料）</button>
+      <p class="modal-subtitle" id="pinPromptError" style="margin-top:0.8rem; color: var(--warn);"></p>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
