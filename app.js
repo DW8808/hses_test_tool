@@ -578,8 +578,8 @@
 
     personLabel.textContent = isStarred
       ? activeAction === 'borrow'
-        ? '使用/消耗者（選填）'
-        : '補充者（選填）'
+        ? '使用/消耗者'
+        : '補充者'
       : activeAction === 'borrow'
       ? '借用者'
       : '歸還者';
@@ -627,8 +627,8 @@
       return;
     }
     const person = getPersonValue();
-    if (!isStarred && activeAction === 'borrow' && !person) {
-      showToast('借還品需要輸入借用者姓名');
+    if (!person) {
+      showToast('請選擇或輸入人員姓名');
       return;
     }
 
@@ -710,23 +710,44 @@
       borrowedOnly: state.borrowedOnly,
       threshold: state.threshold,
       scrollY: window.scrollY,
+      savedAt: Date.now(),
     };
-    sessionStorage.setItem(RELOAD_STATE_KEY, JSON.stringify(snapshot));
+    // 用 localStorage 而不是 sessionStorage：某些瀏覽器環境（例如某些 App 內建瀏覽器）的
+    // 「重新整理」實際上是開一個新的瀏覽階段，sessionStorage 會直接消失；localStorage 綁在
+    // 網域本身，不受瀏覽階段影響，還原後會自己清掉，不會一直殘留。
+    try {
+      localStorage.setItem(RELOAD_STATE_KEY, JSON.stringify(snapshot));
+      console.log('[schoolTestTool] 已儲存重整前的畫面狀態', snapshot);
+    } catch (err) {
+      console.error('[schoolTestTool] 儲存重整前的畫面狀態失敗：', err);
+    }
     setTimeout(() => window.location.reload(), 600);
   }
 
   // 只有在剛剛送出後觸發的這次重整才會還原（讀取後立刻清掉），
   // 使用者自己手動整理網頁（F5）不會被硬拉回舊的捲動位置。
   function restoreReloadState() {
-    const raw = sessionStorage.getItem(RELOAD_STATE_KEY);
-    if (!raw) return;
-    sessionStorage.removeItem(RELOAD_STATE_KEY);
+    const raw = localStorage.getItem(RELOAD_STATE_KEY);
+    if (!raw) {
+      console.log('[schoolTestTool] 沒有找到需要還原的畫面狀態（正常的一般載入）');
+      return;
+    }
+    localStorage.removeItem(RELOAD_STATE_KEY);
     let snapshot;
     try {
       snapshot = JSON.parse(raw);
     } catch (e) {
+      console.error('[schoolTestTool] 還原畫面狀態的資料解析失敗：', e);
       return;
     }
+
+    // 超過 30 秒還沒被還原掉，代表上次那次重整沒有正常跑完 restoreReloadState()
+    // （例如中途又整理了一次網頁），這種舊資料不要拿來套用到現在這次不相關的載入。
+    if (typeof snapshot.savedAt === 'number' && Date.now() - snapshot.savedAt > 30000) {
+      console.log('[schoolTestTool] 找到的畫面狀態已經過期（超過 30 秒），略過還原');
+      return;
+    }
+    console.log('[schoolTestTool] 還原畫面狀態', snapshot);
 
     // 還原篩選條件、重新渲染這段包在 try 裡：就算這裡發生非預期錯誤，
     // 下面還原捲動位置的部分還是要執行，不能因為前面出錯就整個放棄捲回原位。
@@ -758,6 +779,9 @@
     function attemptScroll() {
       attempts++;
       window.scrollTo(0, snapshot.scrollY);
+      console.log(
+        `[schoolTestTool] 第 ${attempts} 次嘗試捲動到 ${snapshot.scrollY}，目前實際位置：${window.scrollY}，頁面總高度：${document.body.scrollHeight}`
+      );
       if (attempts < 5) setTimeout(() => requestAnimationFrame(attemptScroll), attempts * 150);
     }
     requestAnimationFrame(attemptScroll);
