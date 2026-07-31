@@ -499,6 +499,17 @@ body {
   box-shadow: 0 0 0 3px rgba(184, 151, 116, 0.2);
 }
 
+.modal-field input[readonly] {
+  background: var(--cream);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.modal-field input[readonly]:focus {
+  box-shadow: none;
+  border-color: var(--border);
+}
+
 .segmented {
   display: flex;
   border: 1px solid var(--border);

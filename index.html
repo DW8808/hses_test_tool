@@ -160,8 +160,13 @@
   <!-- 首次啟用：只需要輸入 PIN（給拿到連結的老師用，不能改網址、不能取消連線） -->
   <div id="pinPromptOverlay" class="modal-overlay hidden">
     <div class="modal card">
-      <h3>🔒 請輸入通關密碼</h3>
+      <h3>🔒 連線設定</h3>
       <p class="modal-subtitle">請輸入管理者提供給你的 PIN，才能連上共用的庫存資料。輸入一次後這台裝置以後就不用再輸入。</p>
+
+      <div class="modal-field">
+        <label>Web App 網址</label>
+        <input type="text" id="pinPromptUrl" readonly />
+      </div>
 
       <div class="modal-field">
         <label for="pinPromptInput">PIN</label>

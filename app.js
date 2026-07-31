@@ -856,6 +856,7 @@
 
   // ---------- 首次啟用 PIN 輸入（給只帶 ?gasUrl= 網址的老師連結用） ----------
   function openPinPrompt() {
+    document.getElementById('pinPromptUrl').value = pendingGasUrl || '';
     document.getElementById('pinPromptInput').value = '';
     document.getElementById('pinPromptError').textContent = '';
     document.getElementById('pinPromptOverlay').classList.remove('hidden');
