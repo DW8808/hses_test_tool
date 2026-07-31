@@ -373,6 +373,8 @@
     document.getElementById('importFileLabel').classList.toggle('hidden', serverMode);
     // 連線設定按鈕只在網址帶 ?admin=1 時顯示，避免一般使用者誤按到取消連線。
     document.getElementById('connectionBtn').classList.toggle('hidden', !isAdminMode);
+    // 還沒連線（例如剛剛按了「稍後再說」）的話，一般使用者也能看到這顆按鈕，隨時點回去輸入 PIN。
+    document.getElementById('connectNowBtn').classList.toggle('hidden', serverMode || !GAS_URL);
   }
 
   function render() {
@@ -933,6 +935,7 @@
       await loadData();
     });
 
+    document.getElementById('connectNowBtn').addEventListener('click', openPinPrompt);
     document.getElementById('connectionBtn').addEventListener('click', openConnectionModal);
     document.getElementById('connectionModalClose').addEventListener('click', closeConnectionModal);
     document.getElementById('connectionModalOverlay').addEventListener('click', (e) => {
