@@ -4,6 +4,7 @@
   const STORAGE_KEY = 'schoolTestTool.adjustments.v1';
   const CONNECTION_KEY = 'schoolTestTool.connection.v1';
   const PIN_PROMPT_SKIP_KEY = 'schoolTestTool.pinPromptSkipped';
+  const RELOAD_STATE_KEY = 'schoolTestTool.reloadState.v1';
   const LOW_STOCK_DEFAULT = 5;
 
   /** @type {{generatedAt:string, sourceFile:string, borrowers:string[], tests:Array}} */
@@ -692,8 +693,54 @@
 
   // 確認送出成功後一律重新整理整頁（而不是只用 JS 重新渲染），確保畫面狀態完全乾淨。
   // 延遲一下才重整，讓上面的成功提示（toast）至少能被看到一瞬間。
+  // 重整前先把目前的搜尋／篩選條件和捲動位置存起來，重整後還原，
+  // 這樣才不會每次送出都跳回頁面最上方、還要重新搜尋一次剛剛在看的品項。
   function reloadPageAfterSubmit() {
+    const snapshot = {
+      search: state.search,
+      group: state.group,
+      lowStockOnly: state.lowStockOnly,
+      starredOnly: state.starredOnly,
+      borrowedOnly: state.borrowedOnly,
+      threshold: state.threshold,
+      scrollY: window.scrollY,
+    };
+    sessionStorage.setItem(RELOAD_STATE_KEY, JSON.stringify(snapshot));
     setTimeout(() => window.location.reload(), 600);
+  }
+
+  // 只有在剛剛送出後觸發的這次重整才會還原（讀取後立刻清掉），
+  // 使用者自己手動整理網頁（F5）不會被硬拉回舊的捲動位置。
+  function restoreReloadState() {
+    const raw = sessionStorage.getItem(RELOAD_STATE_KEY);
+    if (!raw) return;
+    sessionStorage.removeItem(RELOAD_STATE_KEY);
+    let snapshot;
+    try {
+      snapshot = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+
+    state.search = snapshot.search || '';
+    state.group = snapshot.group || 'all';
+    state.lowStockOnly = !!snapshot.lowStockOnly;
+    state.starredOnly = !!snapshot.starredOnly;
+    state.borrowedOnly = !!snapshot.borrowedOnly;
+    state.threshold = typeof snapshot.threshold === 'number' ? snapshot.threshold : LOW_STOCK_DEFAULT;
+
+    document.getElementById('searchInput').value = state.search;
+    document.getElementById('thresholdInput').value = state.threshold;
+    document.getElementById('lowStockOnly').checked = state.lowStockOnly;
+    document.getElementById('starredOnly').checked = state.starredOnly;
+    document.getElementById('borrowedOnly').checked = state.borrowedOnly;
+
+    render();
+
+    if (typeof snapshot.scrollY === 'number') {
+      // 用 rAF 等清單真的畫完、把頁面撐開之後再捲動，不然頁面還沒那麼高，捲動會被瀏覽器夾住。
+      requestAnimationFrame(() => window.scrollTo(0, snapshot.scrollY));
+    }
   }
 
   function showToast(msg) {
@@ -1035,6 +1082,7 @@
   async function init() {
     bindEvents();
     await loadData();
+    restoreReloadState();
     // 還沒連上雲端、且這次瀏覽階段沒按過「稍後再說」的話，跳出 PIN 輸入視窗。
     if (!isServerMode() && GAS_URL && sessionStorage.getItem(PIN_PROMPT_SKIP_KEY) !== '1') {
       openPinPrompt();
