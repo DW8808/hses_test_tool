@@ -3,6 +3,7 @@
 
   const STORAGE_KEY = 'schoolTestTool.adjustments.v1';
   const CONNECTION_KEY = 'schoolTestTool.connection.v1';
+  const PIN_PROMPT_SKIP_KEY = 'schoolTestTool.pinPromptSkipped';
   const LOW_STOCK_DEFAULT = 5;
 
   /** @type {{generatedAt:string, sourceFile:string, borrowers:string[], tests:Array}} */
@@ -17,10 +18,8 @@
   // 是否顯示「連線設定」按鈕：只有網址帶 ?admin=1 時才顯示，避免老師不小心誤按到連線設定或取消連線。
   let isAdminMode = false;
 
-  // 網址只帶 ?gasUrl=... （沒有 pin）時，代表這是要給老師的連結：先記住網址，
-  // 但還沒有連線，會在畫面上跳出「請輸入通關密碼」的提示，PIN 由管理者另外口頭告知，
-  // 這樣即使連結被轉發出去，對方沒有 PIN 還是連不進去。
-  let pendingGasUrl = null;
+  // Google Apps Script 網址固定寫在 config.js 裡（見該檔案），不透過網址參數傳遞。
+  const GAS_URL = (window.GAS_CONFIG && window.GAS_CONFIG.url) || '';
 
   // 雲端連線設定： { url, pin } 或 null（= 本機模式）
   let connection = loadConnection();
@@ -42,41 +41,20 @@
   }
 
   // ---------- 雲端連線設定持久化 ----------
-  // 支援兩種網址參數用法：
-  // 1. ?gasUrl=...&pin=...  一鍵連線（給管理者自己用，PIN 會留在網址列裡，方便但較不安全）
-  // 2. ?gasUrl=...          只記住網址，PIN 另外口頭告知，畫面會跳出輸入框（建議給其他老師用）
-  // 管理者自己要開啟「連線設定」按鈕時，網址後面加 &admin=1。
-  function applyConnectionFromUrlIfPresent() {
+  // 網址只用來開關「⚙️ 連線設定」按鈕：加 ?admin=1 才會顯示，避免老師不小心誤按到取消連線。
+  // Apps Script 網址固定在 config.js，不會出現在任何連結裡。
+  function applyAdminFlagFromUrl() {
     const params = new URLSearchParams(window.location.search);
-    const gasUrl = params.get('gasUrl');
-    const pin = params.get('pin');
     isAdminMode = params.get('admin') === '1';
-    if (gasUrl && pin) {
-      localStorage.setItem(CONNECTION_KEY, JSON.stringify({ url: gasUrl, pin }));
-    } else if (gasUrl && !isServerModeFromStorage()) {
-      pendingGasUrl = gasUrl;
-    }
     if (params.toString()) {
-      // 清掉網址列上的參數，避免 PIN 一直顯示在網址列/瀏覽紀錄裡
       const url = new URL(window.location.href);
       url.search = '';
       window.history.replaceState({}, '', url.toString());
     }
   }
 
-  function isServerModeFromStorage() {
-    try {
-      const raw = localStorage.getItem(CONNECTION_KEY);
-      if (!raw) return false;
-      const conn = JSON.parse(raw);
-      return !!(conn && conn.url && conn.pin);
-    } catch (e) {
-      return false;
-    }
-  }
-
   function loadConnection() {
-    applyConnectionFromUrlIfPresent();
+    applyAdminFlagFromUrl();
     try {
       const raw = localStorage.getItem(CONNECTION_KEY);
       return raw ? JSON.parse(raw) : null;
@@ -854,9 +832,9 @@
     await loadData();
   }
 
-  // ---------- 首次啟用 PIN 輸入（給只帶 ?gasUrl= 網址的老師連結用） ----------
+  // ---------- 首次啟用 PIN 輸入（網址固定用 config.js 裡的 GAS_URL，使用者只需要輸入 PIN） ----------
   function openPinPrompt() {
-    document.getElementById('pinPromptUrl').value = pendingGasUrl || '';
+    document.getElementById('pinPromptUrl').value = GAS_URL;
     document.getElementById('pinPromptInput').value = '';
     document.getElementById('pinPromptError').textContent = '';
     document.getElementById('pinPromptOverlay').classList.remove('hidden');
@@ -875,11 +853,10 @@
     }
     const submitBtn = document.getElementById('pinPromptSubmit');
     submitBtn.disabled = true;
-    saveConnection({ url: pendingGasUrl, pin });
+    saveConnection({ url: GAS_URL, pin });
     const ok = await loadData();
     submitBtn.disabled = false;
     if (ok) {
-      pendingGasUrl = null;
       closePinPrompt();
     } else {
       saveConnection(null); // PIN 錯誤，不要留著壞掉的連線設定
@@ -969,7 +946,7 @@
       if (e.key === 'Enter') submitPinPrompt();
     });
     document.getElementById('pinPromptSkip').addEventListener('click', () => {
-      pendingGasUrl = null;
+      sessionStorage.setItem(PIN_PROMPT_SKIP_KEY, '1');
       closePinPrompt();
     });
   }
@@ -978,7 +955,10 @@
   async function init() {
     bindEvents();
     await loadData();
-    if (pendingGasUrl) openPinPrompt();
+    // 還沒連上雲端、且這次瀏覽階段沒按過「稍後再說」的話，跳出 PIN 輸入視窗。
+    if (!isServerMode() && GAS_URL && sessionStorage.getItem(PIN_PROMPT_SKIP_KEY) !== '1') {
+      openPinPrompt();
+    }
   }
 
   document.addEventListener('DOMContentLoaded', init);
