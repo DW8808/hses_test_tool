@@ -219,9 +219,10 @@ function setupSheets() {
   Logger.log('設定完成！共匯入 ' + SEED_ITEMS.length + ' 筆品項、' + SEED_BORROWERS.length + ' 位借用者。');
 }
 
-// 設定通關 PIN。預設是 test1234，想改成自己的密碼就改這裡再重新執行一次。
+// 設定通關 PIN。這個檔案會放在公開的 GitHub repo 裡，請務必把下面換成「只有你自己知道」的密碼，
+// 不要用這裡出現過的任何字串（包括這份程式碼註解、聊天紀錄、或任何你貼給別人看過的內容）。
 function setPin() {
-  var pin = 'test1234';
+  var pin = '請改成一組只有你自己知道的密碼';
   PropertiesService.getScriptProperties().setProperty('PIN', pin);
   Logger.log('PIN 已設定完成。');
 }
